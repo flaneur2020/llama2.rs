@@ -35,6 +35,7 @@ fn matmul<const D: usize, const N: usize>(xout: &mut [f64; D], w: &[[f64; N]; D]
     }
 }
 
+#[derive(Debug, Copy, Clone)]
 struct TransformerConfig {
     dim: usize,
     hidden_dim: usize,
@@ -42,6 +43,30 @@ struct TransformerConfig {
     vocab_size: usize,
     n_layers: usize,
     seq_len: usize,
+}
+
+struct TransformerWeights {
+    // token embedding table
+    token_embedding_table: Vec<Vec<f64>>, // (vocab_size, dim)
+    // weights for rmsnorms
+    rms_att_weight: Vec<Vec<f64>>, // (layer, dim) rmsnorm weights
+    rms_ffn_weight: Vec<Vec<f64>>, // (layer, dim)
+    // weights for matmuls
+    wq: Vec<Vec<Vec<f64>>>, // (layer, dim, dim)
+    wk: Vec<Vec<Vec<f64>>>, // (layer, dim, dim)
+    wv: Vec<Vec<Vec<f64>>>, // (layer, dim, dim)
+    wo: Vec<Vec<Vec<f64>>>, // (layer, dim, dim)
+    // weights for ffn
+    w1: Vec<Vec<Vec<f64>>>, // (layer, hidden_dim, dim)
+    w2: Vec<Vec<Vec<f64>>>, // (layer, dim, hidden_dim)
+    w3: Vec<Vec<Vec<f64>>>, // (layer, hidden_dim, dim)
+    // final rmsnorm
+    rms_final_weight: Vec<f64>, // (dim, )
+    // freq_cis for RoPE relatively positional embeddings
+    freq_cis_real: Vec<Vec<f64>>, // (seq_len, head_size/2)
+    freq_cis_imag: Vec<Vec<f64>>, // (seq_len, head_size/2)
+    // (optional) classifier weights for the logits, on the last layer
+    wcls: Vec<f64>,
 }
 
 struct TransformerState {
@@ -55,13 +80,20 @@ struct TransformerState {
     v: Vec<f64>,                     // value (dim, )
     att: Vec<Vec<f64>>,              // buffer for scores/attention values (n_heads, seq_len)
     logits: Vec<f64>,                // output logits (vocab_size, )
+    // ProbIndex *probindex; // buffer used in top-p sampling
     key_cache: Vec<Vec<Vec<f64>>>,   // (layer, seq_len, dim)
     value_cache: Vec<Vec<Vec<f64>>>, // (layer, seq_len, dim)
 }
 
-impl TransformerState {
-    fn new(conf: &TransformerConfig) -> Self {
-        Self {
+struct Transformer {
+    conf: TransformerConfig,
+    weights: TransformerWeights,
+    state: TransformerState,
+}
+
+impl Transformer {
+    pub fn new(conf: &TransformerConfig, weights: TransformerWeights) -> Self {
+        let state = TransformerState {
             x: vec![0.0; conf.dim],
             xb: vec![0.0; conf.dim],
             xb2: vec![0.0; conf.dim],
@@ -78,8 +110,14 @@ impl TransformerState {
             value_cache: (0..conf.n_layers)
                 .map(|_| (0..conf.seq_len).map(|_| vec![0.0; conf.dim]).collect())
                 .collect(),
-        }
+        };
+
+        Self { conf: *conf, weights, state }
     }
+
+    pub fn run(&self) {
+    }
+    
 }
 
 #[cfg(test)]
