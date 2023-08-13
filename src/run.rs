@@ -25,6 +25,15 @@ fn rmsnorm(o: &mut [f64], x: &[f64], w: &[f64]) {
     }
 }
 
+fn rmsnorm2(x: &mut [f64], w: &[f64]) {
+    let ss = x.iter().fold(0.0, |s, n| s + n * n);
+    let rms = ((ss / x.len() as f64) + 1e-5).sqrt();
+    // normalize and scale
+    for i in 0..x.len() {
+        x[i] = x[i] * w[i] / rms;
+    }
+}
+
 fn matmul(xout: &mut [f64], x: &[f64], w: &[Vec<f64>]) {
     // W (d,n) @ x (n,) -> xout (d,)
     for i in 0..w.len() {
@@ -228,7 +237,7 @@ impl TransformerRunner {
         }
 
         // final rmsnorm
-        rmsnorm(&mut s.x, &s.x, &w.rms_final_weight);
+        rmsnorm2(&mut s.x, &w.rms_final_weight);
 
         // classifier into logits
         matmul(&mut s.logits, &s.x, &w.wcls);
