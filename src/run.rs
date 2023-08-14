@@ -2,6 +2,7 @@ use memmap::MmapOptions;
 use memmap::Mmap;
 use std::fs::File;
 use std::ops::Index;
+use std::ops::Range;
 use std::result::Result;
 
 fn accum(a: &mut [f32], b: &[f32]) {
@@ -40,12 +41,12 @@ fn rmsnorm2(x: &mut [f32], w: &[f32]) {
     }
 }
 
-fn matmul(xout: &mut [f32], x: &[f32], w: impl Index<usize, Output=[f32]>) {
+fn matmul(xout: &mut [f32], x: &[f32], w: impl Index<(usize, usize), Output=f32>) {
     // W (d,n) @ x (n,) -> xout (d,)
     for i in 0..xout.len() {
         xout[i] = 0.0;
         for j in 0..x.len() {
-            xout[i] += w[i][j] * x[j];
+            xout[i] += w[(i,j)] * x[j];
         }
     }
 }
@@ -64,6 +65,7 @@ struct TransformerConfig {
 enum TransformerErrorKind {
     InvalidConfig,
     InvalidWeights,
+    InvalidData,
 }
 
 #[derive(Debug)]
@@ -90,71 +92,70 @@ impl std::error::Error for TransformerError {
 }
 
 #[derive(Debug, Default)]
-struct Tensor2D<'a> {
+struct Tensor<'a> {
     data: &'a [f32],
-    shape: (usize, usize),
+    shape: Vec<usize>,
 }
 
-impl<'a> Tensor2D<'a> {
-    pub fn new(data: &'a [f32], shape: (usize, usize)) -> Self {
-        Self { data: &data[0..shape.0 * shape.1], shape }
+impl<'a> Tensor<'a> {
+    pub fn new(data: &'a [f32], shape: Vec<usize>) -> Result<Self, TransformerError> {
+        if data.len() != shape.iter().product() {
+            return Err(TransformerError {
+                kind: TransformerErrorKind::InvalidData,
+                message: format!("invalid shape {:?} for data of length {}", shape, data.len()),
+                source: None,
+            });
+        }
+
+        let tensor = Self { data, shape };
+        Ok(tensor)
     }
 
-    pub fn row_slice_at(&self, idx: usize) -> &'a [f32] {
-        let start = idx * self.shape.1;
-        &self.data[start..start + self.shape.1]
+    pub fn flat(&self) -> &[f32] {
+        self.data
+    }
+
+    pub fn at(&self, idx: usize) -> Result<Self, TransformerError> {
+        if self.shape.len() == 1 {
+            let data = &self.data[idx..idx + 1];
+            return Self::new(data, vec![1]);
+        }
+        let start = idx * self.shape[1];
+        Self::new(&self.data[start..start + self.shape[1]], self.shape[1..].to_vec())
     }
 }
 
-impl std::ops::Index<usize> for &Tensor2D<'_> {
-    type Output = [f32];
+impl Index<(usize, usize)> for &Tensor<'_> {
+    type Output = f32;
 
-    fn index(&self, idx: usize) -> &Self::Output {
-        self.row_slice_at(idx)
-    }
-}
-
-#[derive(Debug, Default)]
-struct Tensor3D<'a> {
-    data: &'a [f32],
-    shape: (usize, usize, usize),
-}
-
-impl<'a> Tensor3D<'a> {
-    pub fn new(data: &'a [f32], shape: (usize, usize, usize)) -> Self {
-        let size = shape.0 * shape.1 * shape.2;
-        Self { data: &data[0..size], shape }
-    }
-
-    pub fn tensor2d_at(&self, idx: usize) -> Tensor2D<'a> {
-        let start = idx * self.shape.1 * self.shape.2;
-        Tensor2D::new(&self.data[start..start + self.shape.1 * self.shape.2], (self.shape.1, self.shape.2))
+    fn index(&self, idx: (usize, usize)) -> &Self::Output {
+        &self.data[idx.0 * self.shape[1] + idx.1]
     }
 }
 
 #[derive(Default)]
 struct TransformerWeights<'a> {
     // token embedding table
-    token_embedding_table: Tensor2D<'a>, // (vocab_size, dim)
+    token_embedding_table: Tensor<'a>, // (vocab_size, dim)
     // weights for rmsnorms
-    rms_att_weight: Tensor2D<'a>, // (layer, dim) rmsnorm weights
-    rms_ffn_weight: Tensor2D<'a>, // (layer, dim)
+    rms_att_weight: Tensor<'a>, // (layer, dim) rmsnorm weights
+    rms_ffn_weight: Tensor<'a>, // (layer, dim)
     // weights for matmuls
-    wq: Tensor3D<'a>, // (layer, dim, dim)
-    wk: Tensor3D<'a>, // (layer, dim, dim)
-    wv: Tensor3D<'a>, // (layer, dim, dim)
-    wo: Tensor3D<'a>, // (layer, dim, dim)
+    wq: Tensor<'a>, // (layer, dim, dim)
+    wk: Tensor<'a>, // (layer, dim, dim)
+    wv: Tensor<'a>, // (layer, dim, dim)
+    wo: Tensor<'a>, // (layer, dim, dim)
     // weights for ffn
-    w1: Tensor3D<'a>, // (layer, hidden_dim, dim)
-    w2: Tensor3D<'a>, // (layer, dim, hidden_dim)
-    w3: Tensor3D<'a>, // (layer, hidden_dim, dim)
+    w1: Tensor<'a>, // (layer, hidden_dim, dim)
+    w2: Tensor<'a>, // (layer, dim, hidden_dim)
+    w3: Tensor<'a>, // (layer, hidden_dim, dim)
     // final rmsnorm
     rms_final_weight: &'a [f32], // (dim, )
     // freq_cis for RoPE relatively positional embeddings
-    freq_cis_real: Tensor2D<'a>, // (seq_len, head_size/2)
-    freq_cis_imag: Tensor2D<'a>, // (seq_len, head_size/2)
+    freq_cis_real: Tensor<'a>, // (seq_len, head_size/2)
+    freq_cis_imag: Tensor<'a>, // (seq_len, head_size/2)
     // (optional) classifier weights for the logits, on the last layer
-    wcls: Tensor2D<'a>, // (vocab_size, dim)
+    wcls: Tensor<'a>, // (vocab_size, dim)
 }
 
 impl<'a> TransformerWeights<'a> {
@@ -212,27 +213,27 @@ impl TransformerRunner {
         }
     }
 
-    pub fn run(&mut self, w: &TransformerWeights, token: usize, pos: usize) {
+    pub fn run(&mut self, w: &TransformerWeights, token: usize, pos: usize) -> Result<(), TransformerError>{
         // a few convenience variables
         let s = &mut self.state;
         let hidden_dim = self.conf.hidden_dim;
         let head_size = self.conf.dim / self.conf.n_heads;
 
         // copy the token embedding into x
-        let content_row = w.token_embedding_table.row_slice_at(token);
-        s.x.copy_from_slice(content_row);
+        let content_row = w.token_embedding_table.at(token)?;
+        s.x.copy_from_slice(content_row.flat());
 
         // pluck out the "pos" row of freq_cis_real and freq_cis_imag
-        let freq_cis_real_row = w.freq_cis_real.row_slice_at(pos);
-        let freq_cis_imag_row = w.freq_cis_imag.row_slice_at(pos);
+        let freq_cis_real_row = w.freq_cis_real.at(pos)?;
+        let freq_cis_imag_row = w.freq_cis_imag.at(pos)?;
 
         // forward all the layers
         for l in 0..self.conf.n_layers {
             // attention rmsnorm
-            rmsnorm(&mut s.xb, &s.x, w.rms_att_weight.row_slice_at(l));
-            matmul(&mut s.q, &s.xb, &w.wq.tensor2d_at(l));
-            matmul(&mut s.k, &s.xb, &w.wk.tensor2d_at(l));
-            matmul(&mut s.v, &s.xb, &w.wv.tensor2d_at(l));
+            rmsnorm(&mut s.xb, &s.x, w.rms_att_weight.at(l)?.flat());
+            matmul(&mut s.q, &s.xb, &w.wq.at(l)?);
+            matmul(&mut s.k, &s.xb, &w.wk.at(l)?);
+            matmul(&mut s.v, &s.xb, &w.wv.at(l)?);
 
             // RoPE relative positional encoding: complex-valued rotate q and k by freq_cis in each head
             for i in 0..self.conf.dim {
@@ -240,8 +241,8 @@ impl TransformerRunner {
                 let q1 = s.q[i + 1];
                 let k0 = s.k[i];
                 let k1 = s.k[i + 1];
-                let fcr = freq_cis_real_row[(i % head_size) / 2];
-                let fci = freq_cis_imag_row[(i % head_size) / 2];
+                let fcr = freq_cis_real_row.flat()[(i % head_size) / 2];
+                let fci = freq_cis_imag_row.flat()[(i % head_size) / 2];
                 s.q[i] = q0 * fcr - q1 * fci;
                 s.q[i + 1] = q0 * fci + q1 * fcr;
                 s.k[i] = k0 * fcr - k1 * fci;
@@ -288,18 +289,18 @@ impl TransformerRunner {
             }
 
             // final matmul to get the output of the attention
-            matmul(&mut s.xb2, &s.xb, &w.wo.tensor2d_at(l));
+            matmul(&mut s.xb2, &s.xb, &w.wo.at(l)?);
 
             // residual connection back into x
             accum(&mut s.x, &s.xb2);
 
             // ffn rmsnorm
-            rmsnorm(&mut s.xb, &s.x, w.rms_ffn_weight.row_slice_at(l));
+            rmsnorm(&mut s.xb, &s.x, w.rms_ffn_weight.at(l)?.flat());
 
             // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
             // first calculate self.w1(x) and self.w3(x)
-            matmul(&mut s.hb, &s.xb, &w.w1.tensor2d_at(l));
-            matmul(&mut s.hb2, &s.xb, &w.w3.tensor2d_at(l));
+            matmul(&mut s.hb, &s.xb, &w.w1.at(l)?);
+            matmul(&mut s.hb2, &s.xb, &w.w3.at(l)?);
 
             // F.silu; silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
             for i in 0..hidden_dim {
@@ -312,7 +313,7 @@ impl TransformerRunner {
             }
 
             // final matmul to get the output of the ffn
-            matmul(&mut s.xb, &s.hb, &w.w2.tensor2d_at(l));
+            matmul(&mut s.xb, &s.hb, &w.w2.at(l)?);
 
             // residual connection
             accum(&mut s.x, &s.xb);
@@ -323,6 +324,8 @@ impl TransformerRunner {
 
         // classifier into logits
         matmul(&mut s.logits, &s.x, &w.wcls);
+
+        Ok(())
     }
 }
 
@@ -342,7 +345,7 @@ mod tests {
     #[test]
     fn test_matmul() {
         let wvec = vec![1.0, 2.0, 3.0, 1.0, 5.0, 1.0]; 
-        let w = Tensor2D::new(&wvec, (2, 3)); // (2,3)
+        let w = Tensor::new(&wvec, vec![2, 3]).unwrap(); // (2,3)
         let x = [2.0, 4.0, 8.0]; // (3,)
         let out: &mut [f32; 2] = &mut [0.0, 0.0]; // (2, )
         matmul(out, &x, &w);
