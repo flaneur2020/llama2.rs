@@ -115,13 +115,18 @@ impl<'a> Tensor<'a> {
         self.data
     }
 
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
     pub fn at(&self, idx: usize) -> Result<Self, TransformerError> {
         if self.shape.len() == 1 {
             let data = &self.data[idx..idx + 1];
             return Self::new(data, vec![1]);
         }
-        let start = idx * self.shape[1];
-        Self::new(&self.data[start..start + self.shape[1]], self.shape[1..].to_vec())
+        let chunk_size: usize = self.shape[1..].iter().product();
+        let start = idx * chunk_size;
+        Self::new(&self.data[start..start + chunk_size], self.shape[1..].to_vec())
     }
 }
 
@@ -351,5 +356,29 @@ mod tests {
         matmul(out, &x, &w);
         assert_eq!(out[0], 34.0);
         assert_eq!(out[1], 30.0);
+    }
+
+    #[test]
+    fn test_tensor() -> Result<(), TransformerError> {
+        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let t = Tensor::new(&v, vec![2, 3]).unwrap();
+        assert_eq!(t.at(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(t.at(1)?.flat().to_vec(), vec![4.0, 5.0, 6.0]);
+
+        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let t = Tensor::new(&v, vec![2, 3, 1]).unwrap();
+        assert_eq!(t.at(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(t.at(1)?.flat().to_vec(), vec![4.0, 5.0, 6.0]);
+        assert_eq!(t.at(0)?.at(0)?.flat().to_vec(), vec![1.0]);
+        assert_eq!(t.at(0)?.at(1)?.flat().to_vec(), vec![2.0]);
+        assert_eq!(t.at(0)?.at(2)?.flat().to_vec(), vec![3.0]);
+        assert_eq!(t.at(1)?.at(0)?.flat().to_vec(), vec![4.0]);
+        assert_eq!(t.at(1)?.shape().to_vec(), vec![3, 1]);
+
+        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        let t = Tensor::new(&v, vec![2, 3, 2, 1]).unwrap();
+        assert_eq!(t.at(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(t.at(1)?.flat().to_vec(), vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]);
+        Ok(())
     }
 }
