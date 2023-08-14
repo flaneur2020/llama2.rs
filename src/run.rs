@@ -66,6 +66,7 @@ enum TransformerErrorKind {
     InvalidConfig,
     InvalidWeights,
     InvalidData,
+    InvalidIndex,
 }
 
 #[derive(Debug)]
@@ -120,6 +121,13 @@ impl<'a> Tensor<'a> {
     }
 
     pub fn at(&self, idx: usize) -> Result<Self, TransformerError> {
+        if idx >= self.shape[0] {
+            return Err(TransformerError {
+                kind: TransformerErrorKind::InvalidIndex,
+                message: format!("index {} out of bounds for shape {:?}", idx, self.shape),
+                source: None,
+            });
+        }
         if self.shape.len() == 1 {
             let data = &self.data[idx..idx + 1];
             return Self::new(data, vec![1]);
@@ -155,7 +163,7 @@ struct TransformerWeights<'a> {
     w2: Tensor<'a>, // (layer, dim, hidden_dim)
     w3: Tensor<'a>, // (layer, hidden_dim, dim)
     // final rmsnorm
-    rms_final_weight: &'a [f32], // (dim, )
+    rms_final_weight: Tensor<'a>, // (dim, )
     // freq_cis for RoPE relatively positional embeddings
     freq_cis_real: Tensor<'a>, // (seq_len, head_size/2)
     freq_cis_imag: Tensor<'a>, // (seq_len, head_size/2)
@@ -325,7 +333,7 @@ impl TransformerRunner {
         }
 
         // final rmsnorm
-        rmsnorm2(&mut s.x, &w.rms_final_weight);
+        rmsnorm2(&mut s.x, &w.rms_final_weight.flat());
 
         // classifier into logits
         matmul(&mut s.logits, &s.x, &w.wcls);
