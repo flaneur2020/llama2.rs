@@ -154,15 +154,14 @@ struct Llama2WeightsReader<'a> {
 impl<'a> Llama2WeightsReader<'a> {
     fn read_tensor(&mut self, shape: &Vec<usize>) -> Result<Tensor<'a>, Llama2Error> {
         let elems = shape.iter().product::<usize>();
-        let data = &self.buf[..elems*4];
         let size_f32 = mem::size_of::<f32>();
-        let size_u8 = mem::size_of::<u8>();
+        let data = &self.buf[..elems * size_f32];
         let data_f32: &[f32] = unsafe {
             assert!(data.len() % size_f32 == 0);
             let ptr = data.as_ptr();
-            mem::transmute(std::slice::from_raw_parts(ptr, data.len() / (size_f32 / size_u8)))
+            mem::transmute(std::slice::from_raw_parts(ptr, data.len() / size_f32))
         };
-        self.buf = &self.buf[elems*4..];
+        self.buf = &self.buf[elems*size_f32..];
         return Tensor::new(data_f32, shape.to_vec());
     }
 }
