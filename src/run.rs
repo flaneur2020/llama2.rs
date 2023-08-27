@@ -1,5 +1,6 @@
 use memmap::MmapOptions;
 use memmap::Mmap;
+use std::mem;
 use std::fs::File;
 use std::ops::Index;
 use std::ops::Range;
@@ -146,6 +147,26 @@ impl Index<(usize, usize)> for &Tensor<'_> {
     }
 }
 
+struct Llama2WeightsReader<'a> {
+    buf: &'a [u8],
+}
+
+impl<'a> Llama2WeightsReader<'a> {
+    fn read_tensor(&mut self, shape: &Vec<usize>) -> Result<Tensor<'a>, Llama2Error> {
+        let elems = shape.iter().product::<usize>();
+        let data = &self.buf[..elems*4];
+        let size_f32 = mem::size_of::<f32>();
+        let size_u8 = mem::size_of::<u8>();
+        let data_f32: &[f32] = unsafe {
+            assert!(data.len() % size_f32 == 0);
+            let ptr = data.as_ptr();
+            mem::transmute(std::slice::from_raw_parts(ptr, data.len() / (size_f32 / size_u8)))
+        };
+        self.buf = &self.buf[elems*4..];
+        return Tensor::new(data_f32, shape.to_vec());
+    }
+}
+
 #[derive(Default)]
 struct Llama2Weights<'a> {
     // token embedding table
@@ -172,8 +193,10 @@ struct Llama2Weights<'a> {
 }
 
 impl<'a> Llama2Weights<'a> {
-    fn init_from_checkpoint(&mut self, data: &[u8], conf: &Llama2Config) -> Self {
-        let weights = Llama2Weights::default();
+    fn init_from_checkpoint(&mut self, data: &[u8], conf: &Llama2Config) -> Result<Self, Llama2Error> {
+        let mut weights = Llama2Weights::default();
+        let head_size = conf.dim / conf.n_heads;
+        let token_embedding_table = Tensor::new(data, vec![conf.vocab_size, conf.dim])?;
         weights
     }
 }
