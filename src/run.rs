@@ -52,7 +52,7 @@ fn matmul(xout: &mut [f32], x: &[f32], w: impl Index<(usize, usize), Output=f32>
 }
 
 #[derive(Debug, Copy, Clone)]
-struct TransformerConfig {
+struct Llama2Config {
     dim: usize,
     hidden_dim: usize,
     n_heads: usize,
@@ -62,7 +62,7 @@ struct TransformerConfig {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum TransformerErrorKind {
+enum Llama2ErrorKind {
     InvalidConfig,
     InvalidWeights,
     InvalidData,
@@ -70,13 +70,13 @@ enum TransformerErrorKind {
 }
 
 #[derive(Debug)]
-struct TransformerError {
-    kind: TransformerErrorKind,
+struct Llama2Error {
+    kind: Llama2ErrorKind,
     message: String,
     source: Option<Box<dyn std::error::Error>>,
 }
 
-impl std::fmt::Display for TransformerError {
+impl std::fmt::Display for Llama2Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message);
         if let Some(source) = &self.source {
@@ -86,7 +86,7 @@ impl std::fmt::Display for TransformerError {
     }
 }
 
-impl std::error::Error for TransformerError {
+impl std::error::Error for Llama2Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_ref().map(|e| &**e)
     }
@@ -99,10 +99,10 @@ struct Tensor<'a> {
 }
 
 impl<'a> Tensor<'a> {
-    pub fn new(data: &'a [f32], shape: Vec<usize>) -> Result<Self, TransformerError> {
+    pub fn new(data: &'a [f32], shape: Vec<usize>) -> Result<Self, Llama2Error> {
         if data.len() != shape.iter().product() {
-            return Err(TransformerError {
-                kind: TransformerErrorKind::InvalidData,
+            return Err(Llama2Error {
+                kind: Llama2ErrorKind::InvalidData,
                 message: format!("invalid shape {:?} for data of length {}", shape, data.len()),
                 source: None,
             });
@@ -120,10 +120,10 @@ impl<'a> Tensor<'a> {
         &self.shape
     }
 
-    pub fn at(&self, idx: usize) -> Result<Self, TransformerError> {
+    pub fn at(&self, idx: usize) -> Result<Self, Llama2Error> {
         if idx >= self.shape[0] {
-            return Err(TransformerError {
-                kind: TransformerErrorKind::InvalidIndex,
+            return Err(Llama2Error {
+                kind: Llama2ErrorKind::InvalidIndex,
                 message: format!("index {} out of bounds for shape {:?}", idx, self.shape),
                 source: None,
             });
@@ -147,7 +147,7 @@ impl Index<(usize, usize)> for &Tensor<'_> {
 }
 
 #[derive(Default)]
-struct TransformerWeights<'a> {
+struct Llama2Weights<'a> {
     // token embedding table
     token_embedding_table: Tensor<'a>, // (vocab_size, dim)
     // weights for rmsnorms
@@ -171,14 +171,14 @@ struct TransformerWeights<'a> {
     wcls: Tensor<'a>, // (vocab_size, dim)
 }
 
-impl<'a> TransformerWeights<'a> {
-    fn init_from_checkpoint(&mut self, data: &[u8], conf: &TransformerConfig) -> Self {
-        let weights = TransformerWeights::default();
+impl<'a> Llama2Weights<'a> {
+    fn init_from_checkpoint(&mut self, data: &[u8], conf: &Llama2Config) -> Self {
+        let weights = Llama2Weights::default();
         weights
     }
 }
 
-struct TransformerState {
+struct Llama2State {
     x: Vec<f32>,        // activation at current time stamp (dim,)
     xb: Vec<f32>,       // same, but inside a residual branch (dim,)
     xb2: Vec<f32>,      // an additional buffer just for convenience (dim,)
@@ -194,14 +194,14 @@ struct TransformerState {
     value_cache: Vec<Vec<Vec<f32>>>, // (layer, seq_len, dim)
 }
 
-struct TransformerRunner {
-    conf: TransformerConfig,
-    state: TransformerState,
+struct Llama2Runner {
+    conf: Llama2Config,
+    state: Llama2State,
 }
 
-impl TransformerRunner {
-    pub fn new(conf: &TransformerConfig, weights: TransformerWeights) -> Self {
-        let state = TransformerState {
+impl Llama2Runner {
+    pub fn new(conf: &Llama2Config, weights: Llama2Weights) -> Self {
+        let state = Llama2State {
             x: vec![0.0; conf.dim],
             xb: vec![0.0; conf.dim],
             xb2: vec![0.0; conf.dim],
@@ -226,7 +226,7 @@ impl TransformerRunner {
         }
     }
 
-    pub fn run(&mut self, w: &TransformerWeights, token: usize, pos: usize) -> Result<(), TransformerError>{
+    pub fn run(&mut self, w: &Llama2Weights, token: usize, pos: usize) -> Result<(), Llama2Error>{
         // a few convenience variables
         let s = &mut self.state;
         let hidden_dim = self.conf.hidden_dim;
@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tensor() -> Result<(), TransformerError> {
+    fn test_tensor() -> Result<(), Llama2Error> {
         let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let t = Tensor::new(&v, vec![2, 3]).unwrap();
         assert_eq!(t.at(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0]);
@@ -387,6 +387,11 @@ mod tests {
         let t = Tensor::new(&v, vec![2, 3, 2, 1]).unwrap();
         assert_eq!(t.at(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         assert_eq!(t.at(1)?.flat().to_vec(), vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]);
+        Ok(())
+    }
+
+
+    fn test_stories() -> Result<(), Llama2Error> {
         Ok(())
     }
 }
