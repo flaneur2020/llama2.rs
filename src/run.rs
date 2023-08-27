@@ -1,7 +1,7 @@
-use memmap::MmapOptions;
 use memmap::Mmap;
-use std::mem;
+use memmap::MmapOptions;
 use std::fs::File;
+use std::mem;
 use std::ops::Index;
 use std::ops::Range;
 use std::result::Result;
@@ -42,12 +42,12 @@ fn rmsnorm2(x: &mut [f32], w: &[f32]) {
     }
 }
 
-fn matmul(xout: &mut [f32], x: &[f32], w: impl Index<(usize, usize), Output=f32>) {
+fn matmul(xout: &mut [f32], x: &[f32], w: impl Index<(usize, usize), Output = f32>) {
     // W (d,n) @ x (n,) -> xout (d,)
     for i in 0..xout.len() {
         xout[i] = 0.0;
         for j in 0..x.len() {
-            xout[i] += w[(i,j)] * x[j];
+            xout[i] += w[(i, j)] * x[j];
         }
     }
 }
@@ -57,6 +57,7 @@ struct Llama2Config {
     dim: usize,
     hidden_dim: usize,
     n_heads: usize,
+    n_kv_heads: usize,
     vocab_size: usize,
     n_layers: usize,
     seq_len: usize,
@@ -93,7 +94,7 @@ impl std::error::Error for Llama2Error {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Tensor<'a> {
     data: &'a [f32],
     shape: Vec<usize>,
@@ -104,7 +105,11 @@ impl<'a> Tensor<'a> {
         if data.len() != shape.iter().product() {
             return Err(Llama2Error {
                 kind: Llama2ErrorKind::InvalidData,
-                message: format!("invalid shape {:?} for data of length {}", shape, data.len()),
+                message: format!(
+                    "invalid shape {:?} for data of length {}",
+                    shape,
+                    data.len()
+                ),
                 source: None,
             });
         }
@@ -135,7 +140,10 @@ impl<'a> Tensor<'a> {
         }
         let chunk_size: usize = self.shape[1..].iter().product();
         let start = idx * chunk_size;
-        Self::new(&self.data[start..start + chunk_size], self.shape[1..].to_vec())
+        Self::new(
+            &self.data[start..start + chunk_size],
+            self.shape[1..].to_vec(),
+        )
     }
 }
 
@@ -161,7 +169,7 @@ impl<'a> Llama2WeightsReader<'a> {
             let ptr = data.as_ptr();
             mem::transmute(std::slice::from_raw_parts(ptr, data.len() / size_f32))
         };
-        self.buf = &self.buf[elems*size_f32..];
+        self.buf = &self.buf[elems * size_f32..];
         return Tensor::new(data_f32, shape);
     }
 }
@@ -192,11 +200,34 @@ struct Llama2Weights<'a> {
 }
 
 impl<'a> Llama2Weights<'a> {
-    fn init_from_checkpoint(&mut self, data: &[u8], conf: &Llama2Config) -> Result<Self, Llama2Error> {
+    fn init_from_checkpoint(
+        &mut self,
+        data: &'a [u8],
+        conf: &Llama2Config,
+    ) -> Result<Self, Llama2Error> {
+        let mut r = Llama2WeightsReader { buf: data };
+        let shared_weights = conf.vocab_size > 0;
         let mut weights = Llama2Weights::default();
         let head_size = conf.dim / conf.n_heads;
-        let token_embedding_table = Tensor::new(data, vec![conf.vocab_size, conf.dim])?;
-        weights
+        weights.token_embedding_table = r.read_tensor(vec![conf.vocab_size, conf.dim])?;
+        weights.rms_att_weight = r.read_tensor(vec![conf.n_layers, conf.dim])?;
+        weights.wq = r.read_tensor(vec![conf.n_layers, conf.dim, conf.n_heads * head_size])?;
+        weights.wk = r.read_tensor(vec![conf.n_layers, conf.dim, conf.n_kv_heads * head_size])?;
+        weights.wv = r.read_tensor(vec![conf.n_layers, conf.dim, conf.n_kv_heads * head_size])?;
+        weights.wo = r.read_tensor(vec![conf.n_layers, conf.n_heads * head_size, conf.dim])?;
+        weights.rms_ffn_weight = r.read_tensor(vec![conf.n_layers, conf.dim])?;
+        weights.w1 = r.read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?;
+        weights.w2 = r.read_tensor(vec![conf.n_layers, conf.dim, conf.hidden_dim])?;
+        weights.w3 = r.read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?;
+        weights.rms_final_weight = r.read_tensor(vec![conf.dim])?;
+        let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_real (for RoPE)
+        let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_imag (for RoPE)
+        weights.wcls = if shared_weights {
+            weights.token_embedding_table.clone()
+        } else {
+            r.read_tensor(vec![conf.vocab_size, conf.dim])?
+        };
+        Ok(weights)
     }
 }
 
@@ -242,13 +273,10 @@ impl Llama2Runner {
                 .collect(),
         };
 
-        Self {
-            conf: *conf,
-            state,
-        }
+        Self { conf: *conf, state }
     }
 
-    pub fn run(&mut self, w: &Llama2Weights, token: usize, pos: usize) -> Result<(), Llama2Error>{
+    pub fn run(&mut self, w: &Llama2Weights, token: usize, pos: usize) -> Result<(), Llama2Error> {
         // a few convenience variables
         let s = &mut self.state;
         let hidden_dim = self.conf.hidden_dim;
@@ -379,7 +407,7 @@ mod tests {
 
     #[test]
     fn test_matmul() {
-        let wvec = vec![1.0, 2.0, 3.0, 1.0, 5.0, 1.0]; 
+        let wvec = vec![1.0, 2.0, 3.0, 1.0, 5.0, 1.0];
         let w = Tensor::new(&wvec, vec![2, 3]).unwrap(); // (2,3)
         let x = [2.0, 4.0, 8.0]; // (3,)
         let out: &mut [f32; 2] = &mut [0.0, 0.0]; // (2, )
@@ -405,13 +433,17 @@ mod tests {
         assert_eq!(t.at(1)?.at(0)?.flat().to_vec(), vec![4.0]);
         assert_eq!(t.at(1)?.shape().to_vec(), vec![3, 1]);
 
-        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        let v = vec![
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ];
         let t = Tensor::new(&v, vec![2, 3, 2, 1]).unwrap();
         assert_eq!(t.at(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        assert_eq!(t.at(1)?.flat().to_vec(), vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]);
+        assert_eq!(
+            t.at(1)?.flat().to_vec(),
+            vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+        );
         Ok(())
     }
-
 
     fn test_stories() -> Result<(), Llama2Error> {
         Ok(())
