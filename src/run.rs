@@ -152,7 +152,7 @@ struct Llama2WeightsReader<'a> {
 }
 
 impl<'a> Llama2WeightsReader<'a> {
-    fn read_tensor(&mut self, shape: &Vec<usize>) -> Result<Tensor<'a>, Llama2Error> {
+    fn read_tensor(&mut self, shape: Vec<usize>) -> Result<Tensor<'a>, Llama2Error> {
         let elems = shape.iter().product::<usize>();
         let size_f32 = mem::size_of::<f32>();
         let data = &self.buf[..elems * size_f32];
@@ -162,7 +162,7 @@ impl<'a> Llama2WeightsReader<'a> {
             mem::transmute(std::slice::from_raw_parts(ptr, data.len() / size_f32))
         };
         self.buf = &self.buf[elems*size_f32..];
-        return Tensor::new(data_f32, shape.to_vec());
+        return Tensor::new(data_f32, shape);
     }
 }
 
