@@ -660,4 +660,10 @@ mod tests {
         assert_eq!(r.total_bytes(), 60816028);
         Ok(())
     }
+
+    #[test]
+    fn test_tokenizer_loader() -> Result<(), Llama2Error> {
+        let mut loader = Llama2TokenizerLoader::new("testdata/stories15M.vocab")?;
+        Ok(())
+    }
 }
