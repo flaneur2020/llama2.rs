@@ -1,10 +1,12 @@
 use memmap::Mmap;
 use memmap::MmapOptions;
+use std::collections::HashMap;
 use std::fs::File;
 use std::mem;
 use std::ops::Index;
 use std::ops::Range;
 use std::result::Result;
+use std::vec;
 
 fn accum(a: &mut [f32], b: &[f32]) {
     for (a, b) in a.iter_mut().zip(b.iter()) {
@@ -309,13 +311,13 @@ impl Llama2CheckpointLoader {
 struct Llama2Tokenizer {
     vocab: Vec<Vec<u8>>,
     vocab_scores: Vec<f32>,
-    sorted_vocab: Vec<(i32, Vec<u8>)>,
     max_token_length: usize,
     byte_pieces: [u8; 256],
+    vocab_index: HashMap<Vec<u8>, usize>,
 }
 
 impl Llama2Tokenizer {
-    pub fn decode(&self, prev_token: usize, token: usize) -> &[u8] {
+    pub fn decode(&self, prev_token: usize, token: usize) -> Result<&[u8], Llama2Error> {
         let mut piece: &[u8] = &self.vocab[token];
         // following BOS (1) token, sentencepiece decoder strips any leading whitespace (see PR #89)
         if prev_token == 1 && piece[0] == b' ' {
@@ -323,13 +325,52 @@ impl Llama2Tokenizer {
         }
         // careful, some tokens designate raw bytes, and look like e.g. '<0x01>'
         // parse this and convert and return the actual byte
-        if piece[0] == b'<' && piece[piece.len()-1] == b'>' {
+        if piece.starts_with(b"<0x") && piece[piece.len()-1] == b'>' {
             let s = String::from_utf8_lossy(&piece[1..piece.len()-1]);
             let s = s.trim_start_matches("0x");
-            let byte = u8::from_str_radix(&s, 16).unwrap();
-            piece = &self.byte_pieces[(byte as usize)..(byte as usize) + 1];
+            if let Ok(byte) = u8::from_str_radix(&s, 16) {
+                piece = &self.byte_pieces[(byte as usize)..(byte as usize) + 1]
+            }
         }
-        piece
+        Ok(piece)
+    }
+
+    // encode the string text (input) into an upper-bound preallocated tokens[] array
+    // bos != 0 means prepend the BOS token (=1), eos != 0 means append the EOS token (=2)
+    pub fn encode(&self, text: &[u8], bos: bool, eos: bool) -> Result<Vec<usize>, Llama2Error> {
+        // create a temporary buffer that will store merge candidates of always two consecutive tokens
+        // *2 for concat, +1 for null terminator +2 for UTF8 (in case max_token_length is 1)
+
+        let str_buf = vec![0u8; self.max_token_length*2+1+2];
+        let str_len = 0;
+
+        let mut n_tokens = 0;
+        let mut tokens: Vec<usize> = vec![];
+
+        if bos {
+            tokens.push(1);
+        }
+
+        // add_dummy_prefix is true by default
+        // so prepend a dummy prefix token to the input string, but only if text != ""
+        // TODO: pretty sure this isn't correct in the general case but I don't have the
+        // energy to read more of the sentencepiece code to figure out what it's doing
+        if text[0] != 0 {
+            let tok = vec![b' '];
+            let dummy_prefix = self.vocab_index.get(&tok).unwrap();
+            tokens.push(*dummy_prefix);
+        }
+
+        // Okay UTF-8 time. This will get messy. Here is the reference from Wikipedia:
+        // Code point ↔ UTF-8 conversion
+        // First code point	Last code point	Byte 1	Byte 2	Byte 3	Byte 4
+        // U+0000	U+007F	    0xxxxxxx
+        // U+0080	U+07FF	    110xxxxx	10xxxxxx
+        // U+0800	U+FFFF	    1110xxxx	10xxxxxx	10xxxxxx
+        // U+10000	U+10FFFF    11110xxx	10xxxxxx	10xxxxxx	10xxxxxx
+
+        // process the raw (UTF-8) byte sequence of the input string
+        todo!()
     }
 }
 
@@ -366,13 +407,16 @@ impl Llama2TokenizerLoader {
             vocabs[i] = self.read_bytes(len as usize)?;
         }
 
-        let mut sorted_vocab = (0..vocab_size).map(|i| (i as i32, vocabs[i].clone())).collect::<Vec<_>>();
-        sorted_vocab.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        let vocab_index = vocabs
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (v.clone(), i))
+            .collect();
 
         Ok(Llama2Tokenizer {
             vocab: vocabs,
             vocab_scores,
-            sorted_vocab,
+            vocab_index,
             max_token_length,
             byte_pieces,
         })
@@ -690,12 +734,20 @@ mod tests {
         let tk = loader.load(32000)?;
         assert_eq!(tk.vocab.len(), 32000);
         assert_eq!(tk.vocab_scores[0], 0.0);
-        let piece = tk.decode(2, 5);
+        let piece = tk.decode(2, 5)?;
         assert_eq!(piece, [2]);
-        let piece = tk.decode(2, 6);
+        let piece = tk.decode(2, 3)?;
+        assert_eq!(piece, [0]);
+        let piece = tk.decode(2, 6)?;
         assert_eq!(piece, [3]);
-        let piece = tk.decode(2, 1000);
+        let piece = tk.decode(2, 1000)?;
         assert_eq!(String::from_utf8_lossy(piece).clone(), "ied");
+        let piece = tk.decode(2, 1001)?;
+        assert_eq!(String::from_utf8_lossy(piece).clone(), "ER");
+
+        for i in 0..32000 {
+            std::str::from_utf8(&tk.vocab[i]).unwrap();
+        }
         Ok(())
     }
 }
