@@ -307,9 +307,9 @@ impl Llama2CheckpointLoader {
 }
 
 struct Llama2Tokenizer {
-    vocab: Vec<String>,
+    vocab: Vec<Vec<u8>>,
     vocab_scores: Vec<f32>,
-    sorted_vocab: Vec<(i32, String)>,
+    sorted_vocab: Vec<(i32, Vec<u8>)>,
     max_token_length: usize,
     byte_pieces: [u8; 512],
 }
@@ -332,9 +332,8 @@ impl Llama2TokenizerLoader {
     }
 
     fn load(&mut self, vocab_size: usize) -> Result<Llama2Tokenizer, Llama2Error> {
-        let mut vocabs = vec![String::new(); vocab_size];
+        let mut vocabs = vec![vec![]; vocab_size];
         let mut vocab_scores = vec![0.0; vocab_size];
-        let max_token_length = self.read_i32()? as usize;
         let mut byte_pieces = [0u8; 512];
 
         for i in 0..256 {
@@ -342,10 +341,11 @@ impl Llama2TokenizerLoader {
             byte_pieces[i*2+1] = 0;
         }
 
+        let max_token_length = self.read_i32()? as usize;
         for i in 0..vocab_size {
             vocab_scores[i] = self.read_f32()?;
             let len = self.read_i32()?;
-            vocabs[i] = self.read_string(len as usize)?;
+            vocabs[i] = self.read_bytes(len as usize)?;
         }
 
         let mut sorted_vocab = (0..vocab_size).map(|i| (i as i32, vocabs[i].clone())).collect::<Vec<_>>();
@@ -362,7 +362,7 @@ impl Llama2TokenizerLoader {
 
     fn read_i32(&mut self) -> Result<i32, Llama2Error> {
         let mut buf = [0u8; 4];
-        self.r.read(&mut buf).or_else(|e| 
+        self.r.read_exact(&mut buf).or_else(|e| 
             Err(Llama2Error {
                 kind: Llama2ErrorKind::IOError,
                 message: format!("failed to read i32: {}", e),
@@ -374,7 +374,7 @@ impl Llama2TokenizerLoader {
 
     fn read_f32(&mut self) -> Result<f32, Llama2Error> {
         let mut buf = [0u8; 4];
-        self.r.read(&mut buf).or_else(|e| 
+        self.r.read_exact(&mut buf).or_else(|e| 
             Err(Llama2Error {
                 kind: Llama2ErrorKind::IOError,
                 message: format!("failed to read f32: {}", e),
@@ -384,19 +384,24 @@ impl Llama2TokenizerLoader {
         Ok(f32::from_le_bytes(buf))
     }
 
-    fn read_string(&mut self, len: usize) -> Result<String, Llama2Error> {
+    fn read_bytes(&mut self, len: usize) -> Result<Vec<u8>, Llama2Error> {
         let mut buf = vec![0u8; len];
-        self.r.read(&mut buf).or_else(|e| 
+        self.r.read_exact(&mut buf).or_else(|e| 
             Err(Llama2Error {
                 kind: Llama2ErrorKind::IOError,
-                message: format!("failed to read string: {}", e),
+                message: format!("failed to read bytes: {}", e),
                 source: Some(Box::new(e)),
             })
         )?;
+        Ok(buf)
+    }
+
+    fn read_string(&mut self, len: usize) -> Result<String, Llama2Error> {
+        let buf = self.read_bytes(len)?;
         Ok(String::from_utf8(buf).or_else(|e| 
             Err(Llama2Error {
                 kind: Llama2ErrorKind::IOError,
-                message: format!("failed to read string in utf8: {}", e),
+                message: format!("failed to read string: {}", e),
                 source: Some(Box::new(e)),
             })
         )?)
@@ -663,7 +668,10 @@ mod tests {
 
     #[test]
     fn test_tokenizer_loader() -> Result<(), Llama2Error> {
-        let mut loader = Llama2TokenizerLoader::new("testdata/stories15M.vocab")?;
+        let mut loader = Llama2TokenizerLoader::new("testdata/tokenizer.bin")?;
+        let tk = loader.load(32000)?;
+        assert_eq!(tk.vocab.len(), 32000);
+        assert_eq!(tk.vocab_scores[0], 0.0);
         Ok(())
     }
 }
