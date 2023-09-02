@@ -55,8 +55,6 @@ fn matmul(xout: &mut [f32], x: &[f32], w: impl Index<(usize, usize), Output = f3
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Llama2ErrorKind {
-    InvalidConfig,
-    InvalidWeights,
     IOError,
     BadInput,
     Unexpected,
@@ -237,7 +235,7 @@ impl Llama2CheckpointLoader {
     fn new(path: &str) -> Result<Self> {
         let file = File::open(path).or_else(|e| {
             Err(Llama2Error {
-                kind: Llama2ErrorKind::InvalidWeights,
+                kind: Llama2ErrorKind::IOError,
                 message: format!("failed to open file {}: {}", path, e),
                 source: Some(Box::new(e)),
             })
@@ -245,7 +243,7 @@ impl Llama2CheckpointLoader {
         let mmap = unsafe {
             MmapOptions::new().map(&file).or_else(|e| {
                 Err(Llama2Error {
-                    kind: Llama2ErrorKind::InvalidWeights,
+                    kind: Llama2ErrorKind::IOError,
                     message: format!("failed to mmap file {}: {}", path, e),
                     source: Some(Box::new(e)),
                 })
