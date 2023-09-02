@@ -350,19 +350,17 @@ impl Llama2Runner {
         Self { conf: *conf, state }
     }
 
-    pub fn run(&mut self, w: &Llama2Weights, token: usize, pos: usize) -> Result<(), Llama2Error> {
+    pub fn forward(&mut self, w: &Llama2Weights, token: usize, pos: usize) -> Result<(), Llama2Error> {
         // a few convenience variables
         let s = &mut self.state;
         let hidden_dim = self.conf.hidden_dim;
         let head_size = self.conf.dim / self.conf.n_heads;
+        let kv_dim = (self.conf.dim * self.conf.n_kv_heads) / self.conf.n_heads;
+        let kv_mul = self.conf.n_heads / self.conf.n_kv_heads;
 
         // copy the token embedding into x
         let content_row = w.token_embedding_table.at(token)?;
         s.x.copy_from_slice(content_row.flat());
-
-        // pluck out the "pos" row of freq_cis_real and freq_cis_imag
-        let freq_cis_real_row = w.freq_cis_real.at(pos)?;
-        let freq_cis_imag_row = w.freq_cis_imag.at(pos)?;
 
         // forward all the layers
         for l in 0..self.conf.n_layers {
@@ -373,24 +371,31 @@ impl Llama2Runner {
             matmul(&mut s.v, &s.xb, &w.wv.at(l)?);
 
             // RoPE relative positional encoding: complex-valued rotate q and k by freq_cis in each head
-            for i in 0..self.conf.dim {
-                let q0 = s.q[i];
-                let q1 = s.q[i + 1];
-                let k0 = s.k[i];
-                let k1 = s.k[i + 1];
-                let fcr = freq_cis_real_row.flat()[(i % head_size) / 2];
-                let fci = freq_cis_imag_row.flat()[(i % head_size) / 2];
-                s.q[i] = q0 * fcr - q1 * fci;
-                s.q[i + 1] = q0 * fci + q1 * fcr;
-                s.k[i] = k0 * fcr - k1 * fci;
-                s.k[i + 1] = k0 * fci + k1 * fcr;
+            for i in (0..self.conf.dim).step_by(2) {
+                let head_dim = i % head_size;
+                let freq = 1.0 / 10000_f32.powf(head_dim as f32 / head_size as f32);
+                let val = pos as f32 * freq;
+                let fcr = val.cos();
+                let fci = val.sin();
+                let rotn = if i < kv_dim { 2 } else { 1 }; // how many vectors? 2 = q & k, 1 = q only
+                for v in 0..rotn {
+                    let vec = if v == 0 {
+                        &s.q
+                    } else {
+                        &s.k
+                    };
+                    let v0 = vec[i];
+                    let v1 = vec[i+1];
+                    vec[i] = v0 * fcr - v1 * fci;
+                    vec[i+1] = v0 * fci + v1 * fcr;
+                }
             }
 
             // save key,value at this time step (pos) to our kv cache
             let key_cache_row = &mut s.key_cache[l][pos];
             let value_cache_row = &mut s.value_cache[l][pos];
-            key_cache_row.copy_from_slice(&s.k);
-            value_cache_row.copy_from_slice(&s.v);
+            key_cache_row.copy_from_slice(&s.k[0..kv_dim * key_cache_row.len()]);
+            value_cache_row.copy_from_slice(&s.v[0..kv_dim * key_cache_row.len()]);
 
             // multihead attention. iterate over all heads
             for h in 0..self.conf.n_heads {
