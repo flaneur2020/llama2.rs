@@ -1,6 +1,6 @@
-# llama2.rs
+# 🦙🦙.🦀
 
-An rust reproduce of <https://github.com/karpathy/llama2.c>.
+An rust reimplementatin of <https://github.com/karpathy/llama2.c>.
 
 ## TODO
 
