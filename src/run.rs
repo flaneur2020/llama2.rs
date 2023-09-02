@@ -182,9 +182,14 @@ struct Llama2Weights<'a> {
 
 struct Llama2CheckpointReader<'a> {
     buf: &'a [u8],
+    total_bytes: usize,
 }
 
 impl<'a> Llama2CheckpointReader<'a> {
+    fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
     fn read_i32(&mut self) -> Result<i32, Llama2Error> {
         if self.buf.len() < 4 {
             return Err(Llama2Error {
@@ -194,6 +199,7 @@ impl<'a> Llama2CheckpointReader<'a> {
             });
         }
         let (int_bytes, rest) = self.buf.split_at(4);
+        self.total_bytes += 4;
         self.buf = rest;
         Ok(i32::from_le_bytes([int_bytes[0], int_bytes[1], int_bytes[2], int_bytes[3]]))
     }
@@ -207,6 +213,7 @@ impl<'a> Llama2CheckpointReader<'a> {
             let ptr = data.as_ptr();
             mem::transmute(std::slice::from_raw_parts(ptr, data.len() / size_f32))
         };
+        self.total_bytes += elems * size_f32;
         self.buf = &self.buf[elems * size_f32..];
         return Tensor::new(data_f32, shape);
     }
@@ -245,7 +252,7 @@ impl Llama2CheckpointLoader {
     }
 
     pub(crate) fn reader(&self) -> Llama2CheckpointReader {
-        Llama2CheckpointReader { buf: &self.mmap[..] }
+        Llama2CheckpointReader { buf: &self.mmap[..], total_bytes: 0 }
     }
 
     pub(crate) fn load_config<'a> (
@@ -287,8 +294,8 @@ impl Llama2CheckpointLoader {
         weights.w2 = r.read_tensor(vec![conf.n_layers, conf.dim, conf.hidden_dim])?;
         weights.w3 = r.read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?;
         weights.rms_final_weight = r.read_tensor(vec![conf.dim])?;
-        let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_real (for RoPE)
-        let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_imag (for RoPE)
+        weights.freq_cis_real = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_real (for RoPE)
+        weights.freq_cis_imag = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_imag (for RoPE)
         weights.wcls = if shared_weights {
             weights.token_embedding_table.clone()
         } else {
@@ -513,9 +520,10 @@ mod tests {
     }
 
     #[test]
-    fn test_stories() -> Result<(), Llama2Error> {
+    fn test_checkpoint_loader() -> Result<(), Llama2Error> {
         let loader = Llama2CheckpointLoader::new("testdata/stories15M.bin")?;
-        let conf = Llama2CheckpointLoader::load_config(&mut loader.reader())?;
+        let mut r = loader.reader();
+        let conf = Llama2CheckpointLoader::load_config(&mut r)?;
         assert_eq!(conf.dim, 288);
         assert_eq!(conf.hidden_dim, 768);
         assert_eq!(conf.n_heads, 6);
@@ -523,6 +531,23 @@ mod tests {
         assert_eq!(conf.vocab_size, 32000);
         assert_eq!(conf.n_layers, 6);
         assert_eq!(conf.seq_len, 256);
+        assert_eq!(r.total_bytes(), 7 * 4);
+        let weights = Llama2CheckpointLoader::load_weights(&mut r, &conf)?;
+        assert_eq!(weights.token_embedding_table.shape(), &[32000, 288]);
+        assert_eq!(weights.rms_att_weight.shape(), &[6, 288]);
+        assert_eq!(weights.rms_ffn_weight.shape(), &[6, 288]);
+        assert_eq!(weights.wq.shape(), &[6, 288, 288]);
+        assert_eq!(weights.wk.shape(), &[6, 288, 288]);
+        assert_eq!(weights.wv.shape(), &[6, 288, 288]);
+        assert_eq!(weights.wo.shape(), &[6, 288, 288]);
+        assert_eq!(weights.w1.shape(), &[6, 768, 288]);
+        assert_eq!(weights.w2.shape(), &[6, 288, 768]);
+        assert_eq!(weights.w3.shape(), &[6, 768, 288]);
+        assert_eq!(weights.rms_final_weight.shape(), &[288]);
+        assert_eq!(weights.freq_cis_real.shape(), &[6144]);
+        assert_eq!(weights.freq_cis_imag.shape(), &[6144]);
+        assert_eq!(weights.wcls.shape(), &[32000, 288]);
+        assert_eq!(r.total_bytes(), 60816028);
         Ok(())
     }
 }
