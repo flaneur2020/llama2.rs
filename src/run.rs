@@ -148,10 +148,10 @@ impl Index<(usize, usize)> for &Tensor<'_> {
 struct Llama2Config {
     dim: usize,
     hidden_dim: usize,
+    n_layers: usize,
     n_heads: usize,
     n_kv_heads: usize,
     vocab_size: usize,
-    n_layers: usize,
     seq_len: usize,
 }
 
@@ -185,16 +185,17 @@ struct Llama2CheckpointReader<'a> {
 }
 
 impl<'a> Llama2CheckpointReader<'a> {
-    fn read_usize(&mut self) -> Result<usize, Llama2Error> {
-        let size_usize = mem::size_of::<usize>();
-        let data = &self.buf[..size_usize];
-        let data_usize: &[usize] = unsafe {
-            assert!(data.len() % size_usize == 0);
-            let ptr = data.as_ptr();
-            mem::transmute(std::slice::from_raw_parts(ptr, data.len() / size_usize))
-        };
-        self.buf = &self.buf[size_usize..];
-        return Ok(data_usize[0]);
+    fn read_i32(&mut self) -> Result<i32, Llama2Error> {
+        if self.buf.len() < 4 {
+            return Err(Llama2Error {
+                kind: Llama2ErrorKind::InvalidData,
+                message: format!("expected 4 bytes, found {}", self.buf.len()),
+                source: None,
+            });
+        }
+        let (int_bytes, rest) = self.buf.split_at(4);
+        self.buf = rest;
+        Ok(i32::from_le_bytes([int_bytes[0], int_bytes[1], int_bytes[2], int_bytes[3]]))
     }
 
     fn read_tensor(&mut self, shape: Vec<usize>) -> Result<Tensor<'a>, Llama2Error> {
@@ -237,34 +238,38 @@ impl Llama2CheckpointLoader {
     }
 
     pub fn load(&self) -> Result<(Llama2Config, Llama2Weights), Llama2Error> {
-        let mut r = Llama2CheckpointReader { buf: &self.mmap[..] };
+        let mut r = self.reader();
         let conf = Self::load_config(&mut r)?;
         let weights = Self::load_weights(&mut r, &conf)?;
         Ok((conf, weights))
     }
 
-    fn load_config<'a> (
+    pub(crate) fn reader(&self) -> Llama2CheckpointReader {
+        Llama2CheckpointReader { buf: &self.mmap[..] }
+    }
+
+    pub(crate) fn load_config<'a> (
         r: &mut Llama2CheckpointReader<'a>,
     ) -> Result<Llama2Config, Llama2Error> {
-        let dim = r.read_usize()?;
-        let hidden_dim = r.read_usize()?;
-        let n_heads = r.read_usize()?;
-        let n_kv_heads = r.read_usize()?;
-        let vocab_size = r.read_usize()?;
-        let n_layers = r.read_usize()?;
-        let seq_len = r.read_usize()?;
+        let dim = r.read_i32()? as usize;
+        let hidden_dim = r.read_i32()? as usize;
+        let n_layers = r.read_i32()? as usize;
+        let n_heads = r.read_i32()? as usize;
+        let n_kv_heads = r.read_i32()? as usize;
+        let vocab_size = r.read_i32()? as usize;
+        let seq_len = r.read_i32()? as usize;
         Ok(Llama2Config {
             dim,
             hidden_dim,
+            n_layers,
             n_heads,
             n_kv_heads,
             vocab_size,
-            n_layers,
             seq_len,
         })
     }
 
-    fn load_weights<'a>(
+    pub(crate) fn load_weights<'a>(
         r: &mut Llama2CheckpointReader<'a>,
         conf: &Llama2Config,
     ) -> Result<Llama2Weights<'a>, Llama2Error> {
@@ -510,15 +515,14 @@ mod tests {
     #[test]
     fn test_stories() -> Result<(), Llama2Error> {
         let loader = Llama2CheckpointLoader::new("testdata/stories15M.bin")?;
-        loader.load(&Llama2Config {
-            dim: 1024,
-            hidden_dim: 4096,
-            n_heads: 16,
-            n_kv_heads: 16,
-            vocab_size: 50257,
-            n_layers: 24,
-            seq_len: 1024,
-        })?;
+        let conf = Llama2CheckpointLoader::load_config(&mut loader.reader())?;
+        assert_eq!(conf.dim, 288);
+        assert_eq!(conf.hidden_dim, 768);
+        assert_eq!(conf.n_heads, 6);
+        assert_eq!(conf.n_kv_heads, 6);
+        assert_eq!(conf.vocab_size, 32000);
+        assert_eq!(conf.n_layers, 6);
+        assert_eq!(conf.seq_len, 256);
         Ok(())
     }
 }
