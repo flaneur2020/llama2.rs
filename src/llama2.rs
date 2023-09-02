@@ -204,7 +204,12 @@ impl<'a> Llama2CheckpointReader<'a> {
         let (int_bytes, rest) = self.buf.split_at(4);
         self.total_bytes += 4;
         self.buf = rest;
-        Ok(i32::from_le_bytes([int_bytes[0], int_bytes[1], int_bytes[2], int_bytes[3]]))
+        Ok(i32::from_le_bytes([
+            int_bytes[0],
+            int_bytes[1],
+            int_bytes[2],
+            int_bytes[3],
+        ]))
     }
 
     fn read_tensor(&mut self, shape: Vec<usize>) -> Result<Tensor<'a>, Llama2Error> {
@@ -255,10 +260,13 @@ impl Llama2CheckpointLoader {
     }
 
     pub(crate) fn reader(&self) -> Llama2CheckpointReader {
-        Llama2CheckpointReader { buf: &self.mmap[..], total_bytes: 0 }
+        Llama2CheckpointReader {
+            buf: &self.mmap[..],
+            total_bytes: 0,
+        }
     }
 
-    pub(crate) fn load_config<'a> (
+    pub(crate) fn load_config<'a>(
         r: &mut Llama2CheckpointReader<'a>,
     ) -> Result<Llama2Config, Llama2Error> {
         let dim = r.read_i32()? as usize;
@@ -325,8 +333,8 @@ impl Llama2Tokenizer {
         }
         // careful, some tokens designate raw bytes, and look like e.g. '<0x01>'
         // parse this and convert and return the actual byte
-        if piece.starts_with(b"<0x") && piece[piece.len()-1] == b'>' {
-            let s = String::from_utf8_lossy(&piece[1..piece.len()-1]);
+        if piece.starts_with(b"<0x") && piece[piece.len() - 1] == b'>' {
+            let s = String::from_utf8_lossy(&piece[1..piece.len() - 1]);
             let s = s.trim_start_matches("0x");
             if let Ok(byte) = u8::from_str_radix(&s, 16) {
                 piece = &self.byte_pieces[(byte as usize)..(byte as usize) + 1]
@@ -351,7 +359,7 @@ impl Llama2Tokenizer {
     pub fn encode(&self, text: &str, bos: bool, eos: bool) -> Result<Vec<usize>, Llama2Error> {
         // create a temporary buffer that will store merge candidates of always two consecutive tokens
         // *2 for concat, +1 for null terminator +2 for UTF8 (in case max_token_length is 1)
-        let mut str_buf = String::with_capacity(self.max_token_length*2+1+2);
+        let mut str_buf = String::with_capacity(self.max_token_length * 2 + 1 + 2);
         let mut tokens: Vec<usize> = vec![];
 
         if bos {
@@ -394,7 +402,7 @@ impl Llama2Tokenizer {
             while i < (tokens.len() - 1) {
                 str_buf.clear();
                 str_buf.push_str(&self.vocab[tokens[i]]);
-                str_buf.push_str(&self.vocab[tokens[i+1]]);
+                str_buf.push_str(&self.vocab[tokens[i + 1]]);
                 if let Some(tok) = self.vocab_index.get(&str_buf) {
                     let new_score = self.vocab_scores[*tok];
                     if new_score > best_score {
@@ -410,7 +418,7 @@ impl Llama2Tokenizer {
                 tokens[idx] = best_token.unwrap();
                 tokens.remove(idx + 1);
             } else {
-                break
+                break;
             }
         }
 
@@ -428,13 +436,13 @@ struct Llama2TokenizerLoader {
 
 impl Llama2TokenizerLoader {
     pub fn new(path: &str) -> Result<Self, Llama2Error> {
-        let f = std::fs::File::open(path).or_else(|e| 
+        let f = std::fs::File::open(path).or_else(|e| {
             Err(Llama2Error {
                 kind: Llama2ErrorKind::IOError,
                 message: format!("failed to open file {}: {}", path, e),
                 source: Some(Box::new(e)),
             })
-        )?;
+        })?;
         let f = std::io::BufReader::new(f);
         Ok(Self { r: Box::new(f) })
     }
@@ -472,51 +480,51 @@ impl Llama2TokenizerLoader {
 
     fn read_i32(&mut self) -> Result<i32, Llama2Error> {
         let mut buf = [0u8; 4];
-        self.r.read_exact(&mut buf).or_else(|e| 
+        self.r.read_exact(&mut buf).or_else(|e| {
             Err(Llama2Error {
                 kind: Llama2ErrorKind::IOError,
                 message: format!("failed to read i32: {}", e),
                 source: Some(Box::new(e)),
             })
-        )?;
+        })?;
         Ok(i32::from_le_bytes(buf))
     }
 
     fn read_f32(&mut self) -> Result<f32, Llama2Error> {
         let mut buf = [0u8; 4];
-        self.r.read_exact(&mut buf).or_else(|e| 
+        self.r.read_exact(&mut buf).or_else(|e| {
             Err(Llama2Error {
                 kind: Llama2ErrorKind::IOError,
                 message: format!("failed to read f32: {}", e),
                 source: Some(Box::new(e)),
             })
-        )?;
+        })?;
         Ok(f32::from_le_bytes(buf))
     }
 
     fn read_bytes(&mut self, len: usize) -> Result<Vec<u8>, Llama2Error> {
         let mut buf = vec![0u8; len];
-        self.r.read_exact(&mut buf).or_else(|e| 
+        self.r.read_exact(&mut buf).or_else(|e| {
             Err(Llama2Error {
                 kind: Llama2ErrorKind::IOError,
                 message: format!("failed to read bytes: {}", e),
                 source: Some(Box::new(e)),
             })
-        )?;
+        })?;
         Ok(buf)
     }
 
     fn read_string(&mut self, len: usize) -> Result<String, Llama2Error> {
         let buf = self.read_bytes(len)?;
-        Ok(String::from_utf8(buf).or_else(|e| 
+        Ok(String::from_utf8(buf).or_else(|e| {
             Err(Llama2Error {
                 kind: Llama2ErrorKind::IOError,
                 message: format!("failed to read string: {}", e),
                 source: Some(Box::new(e)),
             })
-        )?)
+        })?)
     }
-} 
+}
 
 struct Llama2State {
     x: Vec<f32>,        // activation at current time stamp (dim,)
@@ -542,7 +550,11 @@ struct Llama2Runner<'a> {
 }
 
 impl<'a> Llama2Runner<'a> {
-    pub fn new(conf: &Llama2Config, weights: Llama2Weights<'a>, tokenizer: Llama2Tokenizer) -> Self {
+    pub fn new(
+        conf: &Llama2Config,
+        weights: Llama2Weights<'a>,
+        tokenizer: Llama2Tokenizer,
+    ) -> Self {
         let state = Llama2State {
             x: vec![0.0; conf.dim],
             xb: vec![0.0; conf.dim],
@@ -562,7 +574,12 @@ impl<'a> Llama2Runner<'a> {
                 .collect(),
         };
 
-        Self { conf: *conf, state, weights, tokenizer }
+        Self {
+            conf: *conf,
+            state,
+            weights,
+            tokenizer,
+        }
     }
 
     pub fn generate(&mut self, prompt: &str, steps: usize) -> Result<String, Llama2Error> {
@@ -594,25 +611,28 @@ impl<'a> Llama2Runner<'a> {
 
             // data-dependent terminating condition: the BOS (=1) token delimits sequences
             if next == 1 {
-                break
+                break;
             }
 
             token = next;
             result.push(next);
         }
-    
+
         Ok(self.tokenizer.decode_string(&result)?)
-    } 
+    }
 
     pub fn sample(logits: &[f32]) -> Result<usize, Llama2Error> {
         // todo add more sampling methods
-        logits.iter().enumerate().max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).map(|(i, _)| i).ok_or_else(|| 
-            Llama2Error {
+        logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(i, _)| i)
+            .ok_or_else(|| Llama2Error {
                 kind: Llama2ErrorKind::InvalidData,
                 message: format!("failed to sample from logits"),
                 source: None,
-            }
-        )
+            })
     }
 
     pub fn forward(&mut self, token: usize, pos: usize) -> Result<&[f32], Llama2Error> {
@@ -645,15 +665,11 @@ impl<'a> Llama2Runner<'a> {
                 let fci = val.sin();
                 let rotn = if i < kv_dim { 2 } else { 1 }; // how many vectors? 2 = q & k, 1 = q only
                 for v in 0..rotn {
-                    let vec = if v == 0 {
-                        &mut s.q
-                    } else {
-                        &mut s.k
-                    };
+                    let vec = if v == 0 { &mut s.q } else { &mut s.k };
                     let v0 = vec[i];
-                    let v1 = vec[i+1];
+                    let v1 = vec[i + 1];
                     vec[i] = v0 * fcr - v1 * fci;
-                    vec[i+1] = v0 * fci + v1 * fcr;
+                    vec[i + 1] = v0 * fci + v1 * fcr;
                 }
             }
 
@@ -847,18 +863,25 @@ mod tests {
         let tk = loader.load(32000)?;
         let tests = vec![
             ("hello, world", "\n<s>\n -  hello - , -  world - \n</s>\n"),
-            ("i'm 4 years old", "\n<s>\n -  i - ' - m -   - 4 -  years -  old - \n</s>\n"),
+            (
+                "i'm 4 years old",
+                "\n<s>\n -  i - ' - m -   - 4 -  years -  old - \n</s>\n",
+            ),
             ("tiktok", "\n<s>\n -  t - ik - tok - \n</s>\n"),
-            ("wake up september", "\n<s>\n -  w - ake -  up -  september - \n</s>\n"),
+            (
+                "wake up september",
+                "\n<s>\n -  w - ake -  up -  september - \n</s>\n",
+            ),
             ("boy", "\n<s>\n -  boy - \n</s>\n"),
-            ("fan girl", "\n<s>\n -  fan -  girl - \n</s>\n")
+            ("fan girl", "\n<s>\n -  fan -  girl - \n</s>\n"),
         ];
         for tt in tests {
             let tokens = tk.encode(tt.0, true, true)?;
             let tokens_in_string = tokens
                 .iter()
                 .map(|t| tk.vocab[*t].clone())
-                .collect::<Vec<String>>().join(" - ");
+                .collect::<Vec<String>>()
+                .join(" - ");
             assert_eq!(tokens_in_string, tt.1, "failed to encode {}", tt.0);
         }
 
@@ -877,5 +900,4 @@ mod tests {
         assert_eq!(output, " hello, worlders. They were very friendly and");
         Ok(())
     }
-
 }
