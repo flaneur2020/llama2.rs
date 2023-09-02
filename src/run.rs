@@ -380,9 +380,9 @@ impl Llama2Runner {
                 let rotn = if i < kv_dim { 2 } else { 1 }; // how many vectors? 2 = q & k, 1 = q only
                 for v in 0..rotn {
                     let vec = if v == 0 {
-                        &s.q
+                        &mut s.q
                     } else {
-                        &s.k
+                        &mut s.k
                     };
                     let v0 = vec[i];
                     let v1 = vec[i+1];
@@ -394,8 +394,9 @@ impl Llama2Runner {
             // save key,value at this time step (pos) to our kv cache
             let key_cache_row = &mut s.key_cache[l][pos];
             let value_cache_row = &mut s.value_cache[l][pos];
-            key_cache_row.copy_from_slice(&s.k[0..kv_dim * key_cache_row.len()]);
-            value_cache_row.copy_from_slice(&s.v[0..kv_dim * key_cache_row.len()]);
+            let key_cache_len = key_cache_row.len();
+            key_cache_row.copy_from_slice(&s.k[0..kv_dim * key_cache_len]);
+            value_cache_row.copy_from_slice(&s.v[0..kv_dim * key_cache_len]);
 
             // multihead attention. iterate over all heads
             for h in 0..self.conf.n_heads {
