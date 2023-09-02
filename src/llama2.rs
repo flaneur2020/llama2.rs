@@ -593,7 +593,7 @@ impl<'a> Llama2Runner<'a> {
         let mut pos: usize = 0;
         let mut token = prompt_tokens[0];
         let mut result: Vec<usize> = vec![];
-        while (pos < steps) {
+        while pos < steps {
             // forward the transformer to get logits for the next token
             let logits: &[f32] = self.forward(token, pos)?;
 
@@ -603,7 +603,9 @@ impl<'a> Llama2Runner<'a> {
                 prompt_tokens[pos + 1]
             } else {
                 // otherwise sample the next token from the logits
-                Self::sample(&logits)?
+                let token = Self::sample(&logits)?;
+                result.push(token);
+                token
             };
             pos += 1;
 
@@ -613,7 +615,6 @@ impl<'a> Llama2Runner<'a> {
             }
 
             token = next;
-            result.push(next);
         }
 
         Ok(self.tokenizer.decode_string(&result)?)
@@ -894,8 +895,8 @@ mod tests {
         let (conf, weights) = checkpoint_loader.load()?;
         let tokenizer = tokenizer_loader.load(conf.vocab_size)?;
         let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
-        let output = runner.generate("hello, world", 10)?;
-        assert_eq!(output, " hello, worlders. They were very friendly and");
+        let output = runner.generate("hello, world", 15)?;
+        assert_eq!(output, "ers. They were very friendly and always had a smile on");
         Ok(())
     }
 }
