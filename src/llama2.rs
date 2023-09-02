@@ -58,8 +58,9 @@ enum Llama2ErrorKind {
     InvalidConfig,
     InvalidWeights,
     IOError,
-    InvalidData,
-    InvalidIndex,
+    BadInput,
+    Unexpected,
+    TensorError,
 }
 
 #[derive(Debug)]
@@ -97,7 +98,7 @@ impl<'a> Tensor<'a> {
     pub fn new(data: &'a [f32], shape: Vec<usize>) -> Result<Self> {
         if data.len() != shape.iter().product() {
             return Err(Llama2Error {
-                kind: Llama2ErrorKind::InvalidData,
+                kind: Llama2ErrorKind::TensorError,
                 message: format!(
                     "invalid shape {:?} for data of length {}",
                     shape,
@@ -122,7 +123,7 @@ impl<'a> Tensor<'a> {
     pub fn at(&self, idx: usize) -> Result<Self> {
         if idx >= self.shape[0] {
             return Err(Llama2Error {
-                kind: Llama2ErrorKind::InvalidIndex,
+                kind: Llama2ErrorKind::TensorError,
                 message: format!("index {} out of bounds for shape {:?}", idx, self.shape),
                 source: None,
             });
@@ -197,7 +198,7 @@ impl<'a> Llama2CheckpointReader<'a> {
     fn read_i32(&mut self) -> Result<i32> {
         if self.buf.len() < 4 {
             return Err(Llama2Error {
-                kind: Llama2ErrorKind::InvalidData,
+                kind: Llama2ErrorKind::IOError,
                 message: format!("expected 4 bytes, found {}", self.buf.len()),
                 source: None,
             });
@@ -585,7 +586,7 @@ impl<'a> Llama2Runner<'a> {
         let prompt_tokens = self.tokenizer.encode(prompt, true, false)?;
         if prompt_tokens.len() < 1 {
             return Err(Llama2Error {
-                kind: Llama2ErrorKind::InvalidData,
+                kind: Llama2ErrorKind::BadInput,
                 message: format!("something is wrong, expected at least 1 prompt token"),
                 source: None,
             });
@@ -628,7 +629,7 @@ impl<'a> Llama2Runner<'a> {
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .map(|(i, _)| i)
             .ok_or_else(|| Llama2Error {
-                kind: Llama2ErrorKind::InvalidData,
+                kind: Llama2ErrorKind::Unexpected,
                 message: format!("failed to sample from logits"),
                 source: None,
             })
