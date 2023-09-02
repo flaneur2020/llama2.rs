@@ -527,10 +527,11 @@ struct Llama2Runner<'a> {
     conf: Llama2Config,
     state: Llama2State,
     weights: Llama2Weights<'a>,
+    tokenizer: Llama2Tokenizer,
 }
 
 impl<'a> Llama2Runner<'a> {
-    pub fn new(conf: &Llama2Config, weights: Llama2Weights<'a>) -> Self {
+    pub fn new(conf: &Llama2Config, weights: Llama2Weights<'a>, tokenizer: Llama2Tokenizer) -> Self {
         let state = Llama2State {
             x: vec![0.0; conf.dim],
             xb: vec![0.0; conf.dim],
@@ -550,12 +551,58 @@ impl<'a> Llama2Runner<'a> {
                 .collect(),
         };
 
-        Self { conf: *conf, state, weights }
+        Self { conf: *conf, state, weights, tokenizer }
     }
 
-    pub fn generate(&mut self, prompt: String, steps: usize) -> Result<String, Llama2Error> {
-        todo!()
+    pub fn generate(&mut self, prompt: String, steps: usize) -> Result<Vec<usize>, Llama2Error> {
+        let prompt_tokens = self.tokenizer.encode(&prompt, true, false)?;
+        if prompt_tokens.len() < 1 {
+            return Err(Llama2Error {
+                kind: Llama2ErrorKind::InvalidData,
+                message: format!("something is wrong, expected at least 1 prompt token"),
+                source: None,
+            });
+        }
+
+        let mut pos: usize = 0;
+        let mut token = prompt_tokens[0];
+        let mut result: Vec<usize> = vec![];
+        while (pos < steps) {
+            // forward the transformer to get logits for the next token
+            let logits: &[f32] = self.forward(token, pos)?;
+
+            // advance the state state machine
+            let next = if pos < prompt_tokens.len() - 1 {
+                // if we are still processing the input prompt, force the next prompt token
+                prompt_tokens[pos + 1]
+            } else {
+                // otherwise sample the next token from the logits
+                Self::sample(&logits)?
+            };
+            pos += 1;
+
+            // data-dependent terminating condition: the BOS (=1) token delimits sequences
+            if next == 1 {
+                break
+            }
+
+            token = next;
+            result.push(next);
+        }
+    
+        Ok(result)
     } 
+
+    pub fn sample(logits: &[f32]) -> Result<usize, Llama2Error> {
+        // todo add more sampling methods
+        logits.iter().enumerate().max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).map(|(i, _)| i).ok_or_else(|| 
+            Llama2Error {
+                kind: Llama2ErrorKind::InvalidData,
+                message: format!("failed to sample from logits"),
+                source: None,
+            }
+        )
+    }
 
     pub fn forward(&mut self, token: usize, pos: usize) -> Result<&[f32], Llama2Error> {
         // a few convenience variables
