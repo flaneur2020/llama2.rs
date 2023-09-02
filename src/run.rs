@@ -199,9 +199,9 @@ struct Llama2Weights<'a> {
     wcls: Tensor<'a>, // (vocab_size, dim)
 }
 
+
 impl<'a> Llama2Weights<'a> {
-    fn init_from_checkpoint(
-        &mut self,
+    fn load_from_buf(
         data: &'a [u8],
         conf: &Llama2Config,
     ) -> Result<Self, Llama2Error> {
@@ -228,6 +228,34 @@ impl<'a> Llama2Weights<'a> {
             r.read_tensor(vec![conf.vocab_size, conf.dim])?
         };
         Ok(weights)
+    }
+}
+
+struct Llama2WeightsLoader {
+    mmap: Mmap,
+}
+
+impl Llama2WeightsLoader {
+    fn new(path: &str) -> Result<Self, Llama2Error> {
+        let file = File::open(path).or_else(|e|
+            Err(Llama2Error {
+                kind: Llama2ErrorKind::InvalidWeights,
+                message: format!("failed to open file {}: {}", path, e),
+                source: Some(Box::new(e)),
+            })
+        )?;
+        let mmap = unsafe { MmapOptions::new().map(&file).or_else(
+            |e| Err(Llama2Error {
+                kind: Llama2ErrorKind::InvalidWeights,
+                message: format!("failed to mmap file {}: {}", path, e),
+                source: Some(Box::new(e)),
+            })
+        )? };
+        Ok(Self { mmap })
+    }
+
+    fn load(&self, conf: &Llama2Config) -> Result<Llama2Weights, Llama2Error> {
+        Llama2Weights::load_from_buf(&self.mmap[..], conf)
     }
 }
 
