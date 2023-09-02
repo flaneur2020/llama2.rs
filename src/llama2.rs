@@ -335,6 +335,17 @@ impl Llama2Tokenizer {
         Ok(String::from_utf8(piece.to_vec()).unwrap())
     }
 
+    pub fn decode_string(&self, tokens: &[usize]) -> Result<String, Llama2Error> {
+        let mut result = String::new();
+        let mut prev_token = 0;
+        for token in tokens {
+            let piece = self.decode(prev_token, *token)?;
+            result.push_str(&piece);
+            prev_token = *token;
+        }
+        Ok(result)
+    }
+
     // encode the string text (input) into an upper-bound preallocated tokens[] array
     // bos != 0 means prepend the BOS token (=1), eos != 0 means append the EOS token (=2)
     pub fn encode(&self, text: &str, bos: bool, eos: bool) -> Result<Vec<usize>, Llama2Error> {
@@ -554,8 +565,8 @@ impl<'a> Llama2Runner<'a> {
         Self { conf: *conf, state, weights, tokenizer }
     }
 
-    pub fn generate(&mut self, prompt: String, steps: usize) -> Result<Vec<usize>, Llama2Error> {
-        let prompt_tokens = self.tokenizer.encode(&prompt, true, false)?;
+    pub fn generate(&mut self, prompt: &str, steps: usize) -> Result<String, Llama2Error> {
+        let prompt_tokens = self.tokenizer.encode(prompt, true, false)?;
         if prompt_tokens.len() < 1 {
             return Err(Llama2Error {
                 kind: Llama2ErrorKind::InvalidData,
@@ -590,7 +601,7 @@ impl<'a> Llama2Runner<'a> {
             result.push(next);
         }
     
-        Ok(result)
+        Ok(self.tokenizer.decode_string(&result)?)
     } 
 
     pub fn sample(logits: &[f32]) -> Result<usize, Llama2Error> {
@@ -649,9 +660,8 @@ impl<'a> Llama2Runner<'a> {
             // save key,value at this time step (pos) to our kv cache
             let key_cache_row = &mut s.key_cache[l][pos];
             let value_cache_row = &mut s.value_cache[l][pos];
-            let key_cache_len = key_cache_row.len();
-            key_cache_row.copy_from_slice(&s.k[0..kv_dim * key_cache_len]);
-            value_cache_row.copy_from_slice(&s.v[0..kv_dim * key_cache_len]);
+            key_cache_row.copy_from_slice(&s.k[0..kv_dim]);
+            value_cache_row.copy_from_slice(&s.v[0..kv_dim]);
 
             // multihead attention. iterate over all heads
             for h in 0..self.conf.n_heads {
@@ -852,6 +862,19 @@ mod tests {
             assert_eq!(tokens_in_string, tt.1, "failed to encode {}", tt.0);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate() -> Result<(), Llama2Error> {
+        let mut checkpoint_loader = Llama2CheckpointLoader::new("testdata/stories15M.bin")?;
+        let mut tokenizer_loader = Llama2TokenizerLoader::new("testdata/tokenizer.bin")?;
+
+        let (conf, weights) = checkpoint_loader.load()?;
+        let tokenizer = tokenizer_loader.load(conf.vocab_size)?;
+        let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
+        let output = runner.generate("hello, world", 10)?;
+        assert_eq!(output, " hello, worlders. They were very friendly and");
         Ok(())
     }
 
