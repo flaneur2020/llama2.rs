@@ -524,6 +524,74 @@ impl Llama2TokenizerLoader {
     }
 }
 
+struct Llama2Sampler {
+    prob_index: Vec<(f32, usize)>,
+    temperature: f32,
+    topp: f32,
+    rng_state: u64,
+}
+
+impl Llama2Sampler {
+    pub fn sample(&self, logits: &mut [f32]) -> Result<usize> {
+        if self.temperature == 0.0 {
+            return Self::sample_argmax(logits);
+        }
+        return Self::sample_argmax(logits);
+    }
+
+    pub fn sample_topp(probs: &[f32], n: usize, topp: f32, prob_index: &mut Vec<(f32, usize)>, coin: f32) -> Result<usize> {
+        // top-p sampling (or "nucleus sampling") samples from the smallest set of
+        // tokens that exceed probability topp. This way we never sample tokens that
+        // have very low probabilities and are less likely to go "off the rails".
+        // coin is a random number in [0, 1), usually from random_f32()
+
+        let cutoff = (1.0_f32 - topp) / (n - 1) as f32;
+        let mut n0 = 0;
+        for i in 0..n {
+            if probs[i] >= cutoff {
+                prob_index[n0] = (probs[i], i);
+                n0 += 1;
+            }
+        }
+        prob_index[..n0].sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        // truncate the list where cumulative probability exceeds topp
+        let mut cumulative_prob = 0_f32;
+        let mut last_idx = n0 - 1; // in case of rounding errors consider all elements
+        for i in 0..n0 {
+            cumulative_prob += prob_index[i].0;
+            if cumulative_prob > topp {
+                last_idx = i;
+                break; // we've exceeded topp by including last_idx
+            }
+        }
+
+        // sample from the truncated list
+        let r = coin * cumulative_prob;
+        let mut cdf = 0_f32;
+        for i in 0..=last_idx {
+            cdf += prob_index[i].0;
+            if cdf > r {
+                return Ok(prob_index[i].1);
+            }
+        }
+        Ok(prob_index[last_idx].1) // in case of rounding errors
+    }
+
+    pub fn sample_argmax(probs: &[f32]) -> Result<usize> {
+        probs
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(i, _)| i)
+            .ok_or_else(|| Llama2Error {
+                kind: Llama2ErrorKind::Unexpected,
+                message: format!("failed to sample from logits"),
+                source: None,
+            })
+    }
+}
+
 struct Llama2State {
     x: Vec<f32>,        // activation at current time stamp (dim,)
     xb: Vec<f32>,       // same, but inside a residual branch (dim,)
