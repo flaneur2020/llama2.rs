@@ -730,16 +730,18 @@ mod tests {
     #[test]
     fn test_tokenizer() -> Result<(), Llama2Error> {
         // all the tokens are in utf-8
-        let mut loader = Llama2TokenizerLoader:new("testdata/tokenizer.bin")?;
+        let mut loader = Llama2TokenizerLoader::new("testdata/tokenizer.bin")?;
         let tk = loader.load(32000)?;
         assert_eq!(tk.vocab.len(), 32000);
         assert_eq!(tk.vocab_scores[0], 0.0);
-        let piece = tk.decode(2, 5)?;
-        assert_eq!(piece.as_bytes(), [2]);
-        let piece = tk.decode(2, 3)?;
-        assert_eq!(piece.as_bytes(), [0]);
-        let piece = tk.decode(2, 6)?;
-        assert_eq!(piece.as_bytes(), [3]);
+        assert_eq!(tk.decode(2, 3)?, "\u{0}");
+        assert_eq!(tk.decode(2, 5)?, "\u{2}");
+        assert_eq!(tk.decode(2, 6)?, "\u{3}");
+        assert_eq!(tk.decode(2, 1000)?, "ied");
+        assert_eq!(tk.decode(2, 1001)?, "ER");
+        let max_token_len = tk.vocab.iter().map(|v| v.len()).max().unwrap();
+        assert_eq!(max_token_len, 27);
+        assert_eq!(tk.max_token_length, 27);
         Ok(())
     }
 }
