@@ -340,7 +340,7 @@ impl Llama2Tokenizer {
     pub fn encode(&self, text: &str, bos: bool, eos: bool) -> Result<Vec<usize>, Llama2Error> {
         // create a temporary buffer that will store merge candidates of always two consecutive tokens
         // *2 for concat, +1 for null terminator +2 for UTF8 (in case max_token_length is 1)
-        let mut str_buf = Vec::with_capacity(self.max_token_length*2+1+2);
+        let mut str_buf = String::with_capacity(self.max_token_length*2+1+2);
         let mut tokens: Vec<usize> = vec![];
 
         if bos {
@@ -363,23 +363,50 @@ impl Llama2Tokenizer {
                 continue;
             }
             
-            let str: String = str_buf.iter().collect();
-            if let Some(tok) = self.vocab_index.get(&str) {
+            if let Some(tok) = self.vocab_index.get(&str_buf) {
                 // we found this codepoint in vocab, add it as a token
                 tokens.push(*tok);
             } else {
                 // byte_fallback encoding: just encode each byte as a token
                 // +3 is here because the first 3 vocab elements are <unk>, <s>, </s>
                 // so the individual bytes only start at index 3
-                for ch in str_buf.iter() {
-                    tokens.push(*ch as usize + 3);
+                for ch in str_buf.chars() {
+                    tokens.push(ch as usize + 3);
                 }
             }
-            tokens.clear();
+            str_buf.clear();
         }
 
-        // process the raw (UTF-8) byte sequence of the input string
-        todo!()
+        // merge the best consecutive pair each iteration, according the scores in vocab_scores
+        loop {
+            let mut best_score = -1e10_f32;
+            let mut changed = false;
+
+            for i in 0..tokens.len() - 1 {
+                str_buf.clear();
+                str_buf.push_str(&self.vocab[tokens[i]]);
+                str_buf.push_str(&self.vocab[tokens[i+1]]);
+                if let Some(tok) = self.vocab_index.get(&str_buf) {
+                    changed = true;
+                    let score = self.vocab_scores[*tok];
+                    if score > best_score {
+                        best_score = score;
+                        tokens[i] = *tok;
+                        tokens.remove(i+1);
+                    }
+                }
+            }
+
+            if !changed {
+                break
+            }
+        }
+
+        if eos {
+            tokens.push(2);
+        }
+
+        Ok(tokens)
     }
 }
 
