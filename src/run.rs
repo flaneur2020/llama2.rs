@@ -309,16 +309,16 @@ impl Llama2CheckpointLoader {
 }
 
 struct Llama2Tokenizer {
-    vocab: Vec<Vec<u8>>,
+    vocab: Vec<String>,
     vocab_scores: Vec<f32>,
     max_token_length: usize,
     byte_pieces: [u8; 256],
-    vocab_index: HashMap<Vec<u8>, usize>,
+    vocab_index: HashMap<String, usize>,
 }
 
 impl Llama2Tokenizer {
-    pub fn decode(&self, prev_token: usize, token: usize) -> Result<&[u8], Llama2Error> {
-        let mut piece: &[u8] = &self.vocab[token];
+    pub fn decode(&self, prev_token: usize, token: usize) -> Result<String, Llama2Error> {
+        let mut piece: &[u8] = &self.vocab[token].as_bytes();
         // following BOS (1) token, sentencepiece decoder strips any leading whitespace (see PR #89)
         if prev_token == 1 && piece[0] == b' ' {
             piece = &piece[1..];
@@ -332,12 +332,12 @@ impl Llama2Tokenizer {
                 piece = &self.byte_pieces[(byte as usize)..(byte as usize) + 1]
             }
         }
-        Ok(piece)
+        Ok(String::from_utf8(piece.to_vec()).unwrap())
     }
 
     // encode the string text (input) into an upper-bound preallocated tokens[] array
     // bos != 0 means prepend the BOS token (=1), eos != 0 means append the EOS token (=2)
-    pub fn encode(&self, text: &[u8], bos: bool, eos: bool) -> Result<Vec<usize>, Llama2Error> {
+    pub fn encode(&self, text: &str, bos: bool, eos: bool) -> Result<Vec<usize>, Llama2Error> {
         // create a temporary buffer that will store merge candidates of always two consecutive tokens
         // *2 for concat, +1 for null terminator +2 for UTF8 (in case max_token_length is 1)
 
@@ -355,9 +355,8 @@ impl Llama2Tokenizer {
         // so prepend a dummy prefix token to the input string, but only if text != ""
         // TODO: pretty sure this isn't correct in the general case but I don't have the
         // energy to read more of the sentencepiece code to figure out what it's doing
-        if text[0] != 0 {
-            let tok = vec![b' '];
-            let dummy_prefix = self.vocab_index.get(&tok).unwrap();
+        if text.chars().next().unwrap() != '\0' {
+            let dummy_prefix = self.vocab_index.get(" ").unwrap();
             tokens.push(*dummy_prefix);
         }
 
@@ -392,7 +391,7 @@ impl Llama2TokenizerLoader {
     }
 
     fn load(&mut self, vocab_size: usize) -> Result<Llama2Tokenizer, Llama2Error> {
-        let mut vocabs = vec![vec![]; vocab_size];
+        let mut vocabs = vec![String::new(); vocab_size];
         let mut vocab_scores = vec![0.0; vocab_size];
         let mut byte_pieces = [0u8; 256];
 
@@ -404,7 +403,7 @@ impl Llama2TokenizerLoader {
         for i in 0..vocab_size {
             vocab_scores[i] = self.read_f32()?;
             let len = self.read_i32()?;
-            vocabs[i] = self.read_bytes(len as usize)?;
+            vocabs[i] = self.read_string(len as usize)?;
         }
 
         let vocab_index = vocabs
@@ -730,24 +729,17 @@ mod tests {
 
     #[test]
     fn test_tokenizer() -> Result<(), Llama2Error> {
-        let mut loader = Llama2TokenizerLoader::new("testdata/tokenizer.bin")?;
+        // all the tokens are in utf-8
+        let mut loader = Llama2TokenizerLoader:new("testdata/tokenizer.bin")?;
         let tk = loader.load(32000)?;
         assert_eq!(tk.vocab.len(), 32000);
         assert_eq!(tk.vocab_scores[0], 0.0);
         let piece = tk.decode(2, 5)?;
-        assert_eq!(piece, [2]);
+        assert_eq!(piece.as_bytes(), [2]);
         let piece = tk.decode(2, 3)?;
-        assert_eq!(piece, [0]);
+        assert_eq!(piece.as_bytes(), [0]);
         let piece = tk.decode(2, 6)?;
-        assert_eq!(piece, [3]);
-        let piece = tk.decode(2, 1000)?;
-        assert_eq!(String::from_utf8_lossy(piece).clone(), "ied");
-        let piece = tk.decode(2, 1001)?;
-        assert_eq!(String::from_utf8_lossy(piece).clone(), "ER");
-
-        for i in 0..32000 {
-            std::str::from_utf8(&tk.vocab[i]).unwrap();
-        }
+        assert_eq!(piece.as_bytes(), [3]);
         Ok(())
     }
 }
