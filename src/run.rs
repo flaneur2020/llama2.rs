@@ -185,6 +185,18 @@ struct Llama2CheckpointReader<'a> {
 }
 
 impl<'a> Llama2CheckpointReader<'a> {
+    fn read_usize(&mut self) -> Result<usize, Llama2Error> {
+        let size_usize = mem::size_of::<usize>();
+        let data = &self.buf[..size_usize];
+        let data_usize: &[usize] = unsafe {
+            assert!(data.len() % size_usize == 0);
+            let ptr = data.as_ptr();
+            mem::transmute(std::slice::from_raw_parts(ptr, data.len() / size_usize))
+        };
+        self.buf = &self.buf[size_usize..];
+        return Ok(data_usize[0]);
+    }
+
     fn read_tensor(&mut self, shape: Vec<usize>) -> Result<Tensor<'a>, Llama2Error> {
         let elems = shape.iter().product::<usize>();
         let size_f32 = mem::size_of::<f32>();
@@ -224,15 +236,38 @@ impl Llama2CheckpointLoader {
         Ok(Self { mmap })
     }
 
-    fn load(&self, conf: &Llama2Config) -> Result<Llama2Weights, Llama2Error> {
-        Self::load_weights_from_buf(&self.mmap[..], conf)
+    pub fn load(&self) -> Result<(Llama2Config, Llama2Weights), Llama2Error> {
+        let mut r = Llama2CheckpointReader { buf: &self.mmap[..] };
+        let conf = Self::load_config(&mut r)?;
+        let weights = Self::load_weights(&mut r, &conf)?;
+        Ok((conf, weights))
     }
 
-    fn load_weights_from_buf<'a>(
-        data: &'a [u8],
+    fn load_config<'a> (
+        r: &mut Llama2CheckpointReader<'a>,
+    ) -> Result<Llama2Config, Llama2Error> {
+        let dim = r.read_usize()?;
+        let hidden_dim = r.read_usize()?;
+        let n_heads = r.read_usize()?;
+        let n_kv_heads = r.read_usize()?;
+        let vocab_size = r.read_usize()?;
+        let n_layers = r.read_usize()?;
+        let seq_len = r.read_usize()?;
+        Ok(Llama2Config {
+            dim,
+            hidden_dim,
+            n_heads,
+            n_kv_heads,
+            vocab_size,
+            n_layers,
+            seq_len,
+        })
+    }
+
+    fn load_weights<'a>(
+        r: &mut Llama2CheckpointReader<'a>,
         conf: &Llama2Config,
     ) -> Result<Llama2Weights<'a>, Llama2Error> {
-        let mut r = Llama2CheckpointReader { buf: data };
         let shared_weights = conf.vocab_size > 0;
         let mut weights = Llama2Weights::default();
         let head_size = conf.dim / conf.n_heads;
