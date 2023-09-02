@@ -358,11 +358,8 @@ impl Llama2Tokenizer {
 
         let mut chars = text.chars();
         while let Some(ch) = chars.next() {
+            str_buf.clear();
             str_buf.push(ch);
-            if str_buf.len() < 4 {
-                continue;
-            }
-            
             if let Some(tok) = self.vocab_index.get(&str_buf) {
                 // we found this codepoint in vocab, add it as a token
                 tokens.push(*tok);
@@ -370,34 +367,38 @@ impl Llama2Tokenizer {
                 // byte_fallback encoding: just encode each byte as a token
                 // +3 is here because the first 3 vocab elements are <unk>, <s>, </s>
                 // so the individual bytes only start at index 3
-                for ch in str_buf.chars() {
-                    tokens.push(ch as usize + 3);
+                for byte in str_buf.bytes() {
+                    tokens.push(byte as usize + 3);
                 }
             }
-            str_buf.clear();
         }
 
         // merge the best consecutive pair each iteration, according the scores in vocab_scores
         loop {
-            let mut best_score = -1e10_f32;
-            let mut changed = false;
+            let mut best_score = f32::NEG_INFINITY;
+            let mut best_idx: Option<usize> = None;
+            let mut best_token: Option<usize> = None;
+            let mut i = 0;
 
-            for i in 0..tokens.len() - 1 {
+            while i < (tokens.len() - 1) {
                 str_buf.clear();
                 str_buf.push_str(&self.vocab[tokens[i]]);
                 str_buf.push_str(&self.vocab[tokens[i+1]]);
                 if let Some(tok) = self.vocab_index.get(&str_buf) {
-                    changed = true;
-                    let score = self.vocab_scores[*tok];
-                    if score > best_score {
-                        best_score = score;
-                        tokens[i] = *tok;
-                        tokens.remove(i+1);
+                    let new_score = self.vocab_scores[*tok];
+                    if new_score > best_score {
+                        best_score = new_score;
+                        best_idx = Some(i);
+                        best_token = Some(*tok);
                     }
                 }
+                i += 1;
             }
 
-            if !changed {
+            if let Some(idx) = best_idx {
+                tokens[idx] = best_token.unwrap();
+                tokens.remove(idx + 1);
+            } else {
                 break
             }
         }
@@ -765,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tokenizer() -> Result<(), Llama2Error> {
+    fn test_tokenizer_decode() -> Result<(), Llama2Error> {
         // all the tokens are in utf-8
         let mut loader = Llama2TokenizerLoader::new("testdata/tokenizer.bin")?;
         let tk = loader.load(32000)?;
@@ -781,4 +782,30 @@ mod tests {
         assert_eq!(tk.max_token_length, 27);
         Ok(())
     }
+
+    #[test]
+    fn test_tokenizer_encode() -> Result<(), Llama2Error> {
+        // all the tokens are in utf-8
+        let mut loader = Llama2TokenizerLoader::new("testdata/tokenizer.bin")?;
+        let tk = loader.load(32000)?;
+        let tests = vec![
+            ("hello, world", "\n<s>\n -  hello - , -  world - \n</s>\n"),
+            ("i'm 4 years old", "\n<s>\n -  i - ' - m -   - 4 -  years -  old - \n</s>\n"),
+            ("tiktok", "\n<s>\n -  t - ik - tok - \n</s>\n"),
+            ("wake up september", "\n<s>\n -  w - ake -  up -  september - \n</s>\n"),
+            ("boy", "\n<s>\n -  boy - \n</s>\n"),
+            ("fan girl", "\n<s>\n -  fan -  girl - \n</s>\n")
+        ];
+        for tt in tests {
+            let tokens = tk.encode(tt.0, true, true)?;
+            let tokens_in_string = tokens
+                .iter()
+                .map(|t| tk.vocab[*t].clone())
+                .collect::<Vec<String>>().join(" - ");
+            assert_eq!(tokens_in_string, tt.1, "failed to encode {}", tt.0);
+        }
+
+        Ok(())
+    }
+
 }
