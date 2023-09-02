@@ -52,17 +52,6 @@ fn matmul(xout: &mut [f32], x: &[f32], w: impl Index<(usize, usize), Output = f3
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-struct Llama2Config {
-    dim: usize,
-    hidden_dim: usize,
-    n_heads: usize,
-    n_kv_heads: usize,
-    vocab_size: usize,
-    n_layers: usize,
-    seq_len: usize,
-}
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Llama2ErrorKind {
     InvalidConfig,
@@ -155,23 +144,15 @@ impl Index<(usize, usize)> for &Tensor<'_> {
     }
 }
 
-struct Llama2WeightsReader<'a> {
-    buf: &'a [u8],
-}
-
-impl<'a> Llama2WeightsReader<'a> {
-    fn read_tensor(&mut self, shape: Vec<usize>) -> Result<Tensor<'a>, Llama2Error> {
-        let elems = shape.iter().product::<usize>();
-        let size_f32 = mem::size_of::<f32>();
-        let data = &self.buf[..elems * size_f32];
-        let data_f32: &[f32] = unsafe {
-            assert!(data.len() % size_f32 == 0);
-            let ptr = data.as_ptr();
-            mem::transmute(std::slice::from_raw_parts(ptr, data.len() / size_f32))
-        };
-        self.buf = &self.buf[elems * size_f32..];
-        return Tensor::new(data_f32, shape);
-    }
+#[derive(Debug, Copy, Clone)]
+struct Llama2Config {
+    dim: usize,
+    hidden_dim: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
+    vocab_size: usize,
+    n_layers: usize,
+    seq_len: usize,
 }
 
 #[derive(Default)]
@@ -199,13 +180,59 @@ struct Llama2Weights<'a> {
     wcls: Tensor<'a>, // (vocab_size, dim)
 }
 
+struct Llama2CheckpointReader<'a> {
+    buf: &'a [u8],
+}
 
-impl<'a> Llama2Weights<'a> {
-    fn load_from_buf(
+impl<'a> Llama2CheckpointReader<'a> {
+    fn read_tensor(&mut self, shape: Vec<usize>) -> Result<Tensor<'a>, Llama2Error> {
+        let elems = shape.iter().product::<usize>();
+        let size_f32 = mem::size_of::<f32>();
+        let data = &self.buf[..elems * size_f32];
+        let data_f32: &[f32] = unsafe {
+            assert!(data.len() % size_f32 == 0);
+            let ptr = data.as_ptr();
+            mem::transmute(std::slice::from_raw_parts(ptr, data.len() / size_f32))
+        };
+        self.buf = &self.buf[elems * size_f32..];
+        return Tensor::new(data_f32, shape);
+    }
+}
+
+struct Llama2CheckpointLoader {
+    mmap: Mmap,
+}
+
+impl Llama2CheckpointLoader {
+    fn new(path: &str) -> Result<Self, Llama2Error> {
+        let file = File::open(path).or_else(|e| {
+            Err(Llama2Error {
+                kind: Llama2ErrorKind::InvalidWeights,
+                message: format!("failed to open file {}: {}", path, e),
+                source: Some(Box::new(e)),
+            })
+        })?;
+        let mmap = unsafe {
+            MmapOptions::new().map(&file).or_else(|e| {
+                Err(Llama2Error {
+                    kind: Llama2ErrorKind::InvalidWeights,
+                    message: format!("failed to mmap file {}: {}", path, e),
+                    source: Some(Box::new(e)),
+                })
+            })?
+        };
+        Ok(Self { mmap })
+    }
+
+    fn load(&self, conf: &Llama2Config) -> Result<Llama2Weights, Llama2Error> {
+        Self::load_weights_from_buf(&self.mmap[..], conf)
+    }
+
+    fn load_weights_from_buf<'a>(
         data: &'a [u8],
         conf: &Llama2Config,
-    ) -> Result<Self, Llama2Error> {
-        let mut r = Llama2WeightsReader { buf: data };
+    ) -> Result<Llama2Weights<'a>, Llama2Error> {
+        let mut r = Llama2CheckpointReader { buf: data };
         let shared_weights = conf.vocab_size > 0;
         let mut weights = Llama2Weights::default();
         let head_size = conf.dim / conf.n_heads;
@@ -228,34 +255,6 @@ impl<'a> Llama2Weights<'a> {
             r.read_tensor(vec![conf.vocab_size, conf.dim])?
         };
         Ok(weights)
-    }
-}
-
-struct Llama2WeightsLoader {
-    mmap: Mmap,
-}
-
-impl Llama2WeightsLoader {
-    fn new(path: &str) -> Result<Self, Llama2Error> {
-        let file = File::open(path).or_else(|e|
-            Err(Llama2Error {
-                kind: Llama2ErrorKind::InvalidWeights,
-                message: format!("failed to open file {}: {}", path, e),
-                source: Some(Box::new(e)),
-            })
-        )?;
-        let mmap = unsafe { MmapOptions::new().map(&file).or_else(
-            |e| Err(Llama2Error {
-                kind: Llama2ErrorKind::InvalidWeights,
-                message: format!("failed to mmap file {}: {}", path, e),
-                source: Some(Box::new(e)),
-            })
-        )? };
-        Ok(Self { mmap })
-    }
-
-    fn load(&self, conf: &Llama2Config) -> Result<Llama2Weights, Llama2Error> {
-        Llama2Weights::load_from_buf(&self.mmap[..], conf)
     }
 }
 
@@ -473,7 +472,18 @@ mod tests {
         Ok(())
     }
 
+    #[test]
     fn test_stories() -> Result<(), Llama2Error> {
+        let loader = Llama2CheckpointLoader::new("testdata/stories15M.bin")?;
+        loader.load(&Llama2Config {
+            dim: 1024,
+            hidden_dim: 4096,
+            n_heads: 16,
+            n_kv_heads: 16,
+            vocab_size: 50257,
+            n_layers: 24,
+            seq_len: 1024,
+        })?;
         Ok(())
     }
 }
