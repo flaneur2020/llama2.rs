@@ -1,5 +1,11 @@
-# toy-llama2-rs
+# llama2.rs
+
+An rust reproduce of <https://github.com/karpathy/llama2.c>.
+
+## TODO
 
 - [x] Llama2Weights.load
 - [x] tokenizer
-- [ ] scaffold for generate
+- [x] generate
+- [ ] chat
+- [ ] cli
