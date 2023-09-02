@@ -4,8 +4,8 @@ An rust reimplementatin of <https://github.com/karpathy/llama2.c>.
 
 ## TODO
 
-- [x] Llama2Weights.load
+- [x] Llama2Runner
 - [x] tokenizer
 - [x] generate
-- [ ] chat
+- [ ] samplers
 - [ ] cli
