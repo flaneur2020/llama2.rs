@@ -1,3 +1,5 @@
 # toy-llama2-rs
 
-- [ ] Llama2Weights.load
+- [x] Llama2Weights.load
+- [ ] tokenizer
+- [ ] scaffold for generate

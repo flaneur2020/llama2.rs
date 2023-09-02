@@ -56,6 +56,7 @@ fn matmul(xout: &mut [f32], x: &[f32], w: impl Index<(usize, usize), Output = f3
 enum Llama2ErrorKind {
     InvalidConfig,
     InvalidWeights,
+    IOError,
     InvalidData,
     InvalidIndex,
 }
@@ -305,6 +306,103 @@ impl Llama2CheckpointLoader {
     }
 }
 
+struct Llama2Tokenizer {
+    vocab: Vec<String>,
+    vocab_scores: Vec<f32>,
+    sorted_vocab: Vec<(i32, String)>,
+    max_token_length: usize,
+    byte_pieces: [u8; 512],
+}
+
+struct Llama2TokenizerLoader {
+    r: Box<dyn std::io::Read>,
+}
+
+impl Llama2TokenizerLoader {
+    pub fn new(path: &str) -> Result<Self, Llama2Error> {
+        let f = std::fs::File::open(path).or_else(|e| 
+            Err(Llama2Error {
+                kind: Llama2ErrorKind::IOError,
+                message: format!("failed to open file {}: {}", path, e),
+                source: Some(Box::new(e)),
+            })
+        )?;
+        let f = std::io::BufReader::new(f);
+        Ok(Self { r: Box::new(f) })
+    }
+
+    fn load(&mut self, vocab_size: usize) -> Result<Llama2Tokenizer, Llama2Error> {
+        let mut vocabs = vec![String::new(); vocab_size];
+        let mut vocab_scores = vec![0.0; vocab_size];
+        let max_token_length = self.read_i32()? as usize;
+        let mut byte_pieces = [0u8; 512];
+
+        for i in 0..256 {
+            byte_pieces[i*2] = i as u8;
+            byte_pieces[i*2+1] = 0;
+        }
+
+        for i in 0..vocab_size {
+            vocab_scores[i] = self.read_f32()?;
+            let len = self.read_i32()?;
+            vocabs[i] = self.read_string(len as usize)?;
+        }
+
+        let mut sorted_vocab = (0..vocab_size).map(|i| (i as i32, vocabs[i].clone())).collect::<Vec<_>>();
+        sorted_vocab.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+        Ok(Llama2Tokenizer {
+            vocab: vocabs,
+            vocab_scores,
+            sorted_vocab,
+            max_token_length,
+            byte_pieces,
+        })
+    }
+
+    fn read_i32(&mut self) -> Result<i32, Llama2Error> {
+        let mut buf = [0u8; 4];
+        self.r.read(&mut buf).or_else(|e| 
+            Err(Llama2Error {
+                kind: Llama2ErrorKind::IOError,
+                message: format!("failed to read i32: {}", e),
+                source: Some(Box::new(e)),
+            })
+        )?;
+        Ok(i32::from_le_bytes(buf))
+    }
+
+    fn read_f32(&mut self) -> Result<f32, Llama2Error> {
+        let mut buf = [0u8; 4];
+        self.r.read(&mut buf).or_else(|e| 
+            Err(Llama2Error {
+                kind: Llama2ErrorKind::IOError,
+                message: format!("failed to read f32: {}", e),
+                source: Some(Box::new(e)),
+            })
+        )?;
+        Ok(f32::from_le_bytes(buf))
+    }
+
+    fn read_string(&mut self, len: usize) -> Result<String, Llama2Error> {
+        let mut buf = vec![0u8; len];
+        self.r.read(&mut buf).or_else(|e| 
+            Err(Llama2Error {
+                kind: Llama2ErrorKind::IOError,
+                message: format!("failed to read string: {}", e),
+                source: Some(Box::new(e)),
+            })
+        )?;
+        Ok(String::from_utf8(buf).or_else(|e| 
+            Err(Llama2Error {
+                kind: Llama2ErrorKind::IOError,
+                message: format!("failed to read string in utf8: {}", e),
+                source: Some(Box::new(e)),
+            })
+        )?)
+    }
+} 
+
 struct Llama2State {
     x: Vec<f32>,        // activation at current time stamp (dim,)
     xb: Vec<f32>,       // same, but inside a residual branch (dim,)
@@ -321,13 +419,14 @@ struct Llama2State {
     value_cache: Vec<Vec<Vec<f32>>>, // (layer, seq_len, dim)
 }
 
-struct Llama2Runner {
+struct Llama2Runner<'a> {
     conf: Llama2Config,
     state: Llama2State,
+    weights: Llama2Weights<'a>,
 }
 
-impl Llama2Runner {
-    pub fn new(conf: &Llama2Config, weights: Llama2Weights) -> Self {
+impl<'a> Llama2Runner<'a> {
+    pub fn new(conf: &Llama2Config, weights: Llama2Weights<'a>) -> Self {
         let state = Llama2State {
             x: vec![0.0; conf.dim],
             xb: vec![0.0; conf.dim],
@@ -347,12 +446,17 @@ impl Llama2Runner {
                 .collect(),
         };
 
-        Self { conf: *conf, state }
+        Self { conf: *conf, state, weights }
     }
 
-    pub fn forward(&mut self, w: &Llama2Weights, token: usize, pos: usize) -> Result<(), Llama2Error> {
+    pub fn generate(&mut self, prompt: String, steps: usize) -> Result<String, Llama2Error> {
+        todo!()
+    } 
+
+    pub fn forward(&mut self, token: usize, pos: usize) -> Result<&[f32], Llama2Error> {
         // a few convenience variables
         let s = &mut self.state;
+        let w = &self.weights;
         let hidden_dim = self.conf.hidden_dim;
         let head_size = self.conf.dim / self.conf.n_heads;
         let kv_dim = (self.conf.dim * self.conf.n_kv_heads) / self.conf.n_heads;
@@ -468,7 +572,7 @@ impl Llama2Runner {
         // classifier into logits
         matmul(&mut s.logits, &s.x, &w.wcls);
 
-        Ok(())
+        Ok(&s.logits)
     }
 }
 
