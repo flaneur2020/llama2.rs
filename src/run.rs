@@ -311,7 +311,26 @@ struct Llama2Tokenizer {
     vocab_scores: Vec<f32>,
     sorted_vocab: Vec<(i32, Vec<u8>)>,
     max_token_length: usize,
-    byte_pieces: [u8; 512],
+    byte_pieces: [u8; 256],
+}
+
+impl Llama2Tokenizer {
+    pub fn decode(&self, prev_token: usize, token: usize) -> &[u8] {
+        let mut piece: &[u8] = &self.vocab[token];
+        // following BOS (1) token, sentencepiece decoder strips any leading whitespace (see PR #89)
+        if prev_token == 1 && piece[0] == b' ' {
+            piece = &piece[1..];
+        }
+        // careful, some tokens designate raw bytes, and look like e.g. '<0x01>'
+        // parse this and convert and return the actual byte
+        if piece[0] == b'<' && piece[piece.len()-1] == b'>' {
+            let s = String::from_utf8_lossy(&piece[1..piece.len()-1]);
+            let s = s.trim_start_matches("0x");
+            let byte = u8::from_str_radix(&s, 16).unwrap();
+            piece = &self.byte_pieces[(byte as usize)..(byte as usize) + 1];
+        }
+        piece
+    }
 }
 
 struct Llama2TokenizerLoader {
@@ -334,11 +353,10 @@ impl Llama2TokenizerLoader {
     fn load(&mut self, vocab_size: usize) -> Result<Llama2Tokenizer, Llama2Error> {
         let mut vocabs = vec![vec![]; vocab_size];
         let mut vocab_scores = vec![0.0; vocab_size];
-        let mut byte_pieces = [0u8; 512];
+        let mut byte_pieces = [0u8; 256];
 
         for i in 0..256 {
-            byte_pieces[i*2] = i as u8;
-            byte_pieces[i*2+1] = 0;
+            byte_pieces[i] = i as u8;
         }
 
         let max_token_length = self.read_i32()? as usize;
@@ -667,11 +685,17 @@ mod tests {
     }
 
     #[test]
-    fn test_tokenizer_loader() -> Result<(), Llama2Error> {
+    fn test_tokenizer() -> Result<(), Llama2Error> {
         let mut loader = Llama2TokenizerLoader::new("testdata/tokenizer.bin")?;
         let tk = loader.load(32000)?;
         assert_eq!(tk.vocab.len(), 32000);
         assert_eq!(tk.vocab_scores[0], 0.0);
+        let piece = tk.decode(2, 5);
+        assert_eq!(piece, [2]);
+        let piece = tk.decode(2, 6);
+        assert_eq!(piece, [3]);
+        let piece = tk.decode(2, 1000);
+        assert_eq!(String::from_utf8_lossy(piece).clone(), "ied");
         Ok(())
     }
 }
