@@ -340,11 +340,7 @@ impl Llama2Tokenizer {
     pub fn encode(&self, text: &str, bos: bool, eos: bool) -> Result<Vec<usize>, Llama2Error> {
         // create a temporary buffer that will store merge candidates of always two consecutive tokens
         // *2 for concat, +1 for null terminator +2 for UTF8 (in case max_token_length is 1)
-
-        let str_buf = vec![0u8; self.max_token_length*2+1+2];
-        let str_len = 0;
-
-        let mut n_tokens = 0;
+        let mut str_buf = Vec::with_capacity(self.max_token_length*2+1+2);
         let mut tokens: Vec<usize> = vec![];
 
         if bos {
@@ -360,13 +356,27 @@ impl Llama2Tokenizer {
             tokens.push(*dummy_prefix);
         }
 
-        // Okay UTF-8 time. This will get messy. Here is the reference from Wikipedia:
-        // Code point ↔ UTF-8 conversion
-        // First code point	Last code point	Byte 1	Byte 2	Byte 3	Byte 4
-        // U+0000	U+007F	    0xxxxxxx
-        // U+0080	U+07FF	    110xxxxx	10xxxxxx
-        // U+0800	U+FFFF	    1110xxxx	10xxxxxx	10xxxxxx
-        // U+10000	U+10FFFF    11110xxx	10xxxxxx	10xxxxxx	10xxxxxx
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            str_buf.push(ch);
+            if str_buf.len() < 4 {
+                continue;
+            }
+            
+            let str: String = str_buf.iter().collect();
+            if let Some(tok) = self.vocab_index.get(&str) {
+                // we found this codepoint in vocab, add it as a token
+                tokens.push(*tok);
+            } else {
+                // byte_fallback encoding: just encode each byte as a token
+                // +3 is here because the first 3 vocab elements are <unk>, <s>, </s>
+                // so the individual bytes only start at index 3
+                for ch in str_buf.iter() {
+                    tokens.push(*ch as usize + 3);
+                }
+            }
+            tokens.clear();
+        }
 
         // process the raw (UTF-8) byte sequence of the input string
         todo!()
