@@ -539,6 +539,19 @@ impl Llama2Sampler {
         return Self::sample_argmax(logits);
     }
 
+    pub fn sample_multi(probs: &[f32], coin: f32) -> usize {
+        // sample index from probabilities (they must sum to 1!)
+        // coin is a random number in [0, 1), usually from random_f32()
+        let mut cdf = 0_f32;
+        for (i, p) in probs.iter().enumerate() {
+            cdf += p;
+            if cdf > coin {
+                return i;
+            }
+        }
+        probs.len() - 1 // in case of rounding errors
+    }
+
     pub fn sample_topp(probs: &[f32], n: usize, topp: f32, prob_index: &mut Vec<(f32, usize)>, coin: f32) -> Result<usize> {
         // top-p sampling (or "nucleus sampling") samples from the smallest set of
         // tokens that exceed probability topp. This way we never sample tokens that
