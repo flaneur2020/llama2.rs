@@ -689,7 +689,7 @@ impl<'a> Llama2Runner<'a> {
         }
     }
 
-    pub fn generate(&mut self, prompt: &str, steps: usize) -> Result<String> {
+    pub fn generate(&mut self, prompt: &str, steps: usize, sampler: &mut Llama2Sampler) -> Result<String> {
         let prompt_tokens = self.tokenizer.encode(prompt, true, false)?;
         if prompt_tokens.len() < 1 {
             return Err(Llama2Error {
@@ -704,7 +704,7 @@ impl<'a> Llama2Runner<'a> {
         let mut result: Vec<usize> = vec![];
         while pos < steps {
             // forward the transformer to get logits for the next token
-            let logits: &[f32] = self.forward(token, pos)?;
+            let logits = self.forward(token, pos)?;
 
             // advance the state state machine
             let next = if pos < prompt_tokens.len() - 1 {
@@ -712,7 +712,7 @@ impl<'a> Llama2Runner<'a> {
                 prompt_tokens[pos + 1]
             } else {
                 // otherwise sample the next token from the logits
-                let token = Self::sample(&logits)?;
+                let token = sampler.sample(logits)?;
                 result.push(token);
                 token
             };
@@ -729,21 +729,7 @@ impl<'a> Llama2Runner<'a> {
         Ok(self.tokenizer.decode_string(&result)?)
     }
 
-    pub fn sample(logits: &[f32]) -> Result<usize> {
-        // todo add more sampling methods
-        logits
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(i, _)| i)
-            .ok_or_else(|| Llama2Error {
-                kind: Llama2ErrorKind::Unexpected,
-                message: format!("failed to sample from logits"),
-                source: None,
-            })
-    }
-
-    pub fn forward(&mut self, token: usize, pos: usize) -> Result<&[f32]> {
+    pub fn forward(&mut self, token: usize, pos: usize) -> Result<&mut [f32]> {
         // a few convenience variables
         let s = &mut self.state;
         let w = &self.weights;
@@ -857,7 +843,7 @@ impl<'a> Llama2Runner<'a> {
         // classifier into logits
         matmul(&mut s.logits, &s.x, &w.wcls);
 
-        Ok(&s.logits)
+        Ok(&mut s.logits)
     }
 }
 
@@ -1003,8 +989,9 @@ mod tests {
 
         let (conf, weights) = checkpoint_loader.load()?;
         let tokenizer = tokenizer_loader.load(conf.vocab_size)?;
+        let mut sampler = Llama2Sampler::new(conf.vocab_size, 0.0, 0.0);
         let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
-        let output = runner.generate("hello, world", 15)?;
+        let output = runner.generate("hello, world", 15, &mut sampler)?;
         assert_eq!(output, "ers. They were very friendly and always had a smile on");
         Ok(())
     }
