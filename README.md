@@ -2,7 +2,7 @@
 
 An rust reimplementatin of <https://github.com/karpathy/llama2.c>.
 
-## Run locally
+## Run it
 
 This repo contains a tinystories15M in the `testdata/` folder, you can run it with the following command:
 
