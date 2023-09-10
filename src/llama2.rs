@@ -704,7 +704,7 @@ impl<'a> Llama2Runner<'a> {
         steps: usize,
         sampler: &'a mut Llama2Sampler,
     ) -> Result<Llama2RunnerOutputGenerator<'a>> {
-        Llama2RunnerOutputGenerator::new(self, sampler, prompt, steps)
+        Llama2RunnerOutputGenerator::new(self, sampler, prompt, steps, self.conf.seq_len)
     }
 
     pub fn forward(&mut self, token: usize, pos: usize) -> Result<&mut [f32]> {
@@ -827,6 +827,7 @@ impl<'a> Llama2Runner<'a> {
 pub struct Llama2RunnerOutputGenerator<'a> {
     pos: usize,
     steps: usize,
+    seq_len: usize,
     prompt_tokens: Vec<usize>,
     token: usize,
     sampler: &'a mut Llama2Sampler,
@@ -840,6 +841,7 @@ impl<'a> Llama2RunnerOutputGenerator<'a> {
         sampler: &'a mut Llama2Sampler,
         prompt: &str,
         steps: usize,
+        seq_len: usize,
     ) -> Result<Self> {
         let prompt_tokens = runner.tokenizer.encode(prompt, true, false)?;
         if prompt_tokens.is_empty() {
@@ -858,6 +860,7 @@ impl<'a> Llama2RunnerOutputGenerator<'a> {
             prompt_tokens,
             sampler,
             runner,
+            seq_len,
             total_time: Duration::new(0, 0),
         })
     }
@@ -869,6 +872,9 @@ impl<'a> Llama2RunnerOutputGenerator<'a> {
 
     fn forward_next(&mut self) -> Result<Option<String>> {
         if self.pos >= self.steps + self.prompt_tokens.len() {
+            return Ok(None);
+        }
+        if self.pos >= self.seq_len {
             return Ok(None);
         }
 
