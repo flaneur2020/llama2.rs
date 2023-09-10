@@ -9,5 +9,6 @@ cargo run --release
 ./target/release/llama2-rs "rust is a crab"
 ```
 
-https://github.com/flaneur2020/llama2.rs/assets/129800/a26755da-67bd-42f2-b2d7-6cb01a80f9bc
+https://github.com/flaneur2020/llama2.rs/assets/129800/8754c25e-c016-47b0-bb97-99930624a097
+
 
