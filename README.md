@@ -17,6 +17,6 @@ https://github.com/flaneur2020/llama2.rs/assets/129800/8754c25e-c016-47b0-bb97-9
 
 | model | tokens/s |
 | ----- | -------- |
-| tinystories15M | 75 |  
+| tinystories15M | 64~75 |  
 
 
