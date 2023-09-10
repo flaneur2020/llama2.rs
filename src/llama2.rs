@@ -73,9 +73,10 @@ pub struct Llama2Error {
 
 impl std::fmt::Display for Llama2Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message);
+        write!(f, "{:?}", self.kind)?;
+        write!(f, "{}", self.message)?;
         if let Some(source) = &self.source {
-            write!(f, ": {}", source);
+            write!(f, ": {}", source)?;
         }
         Ok(())
     }
@@ -192,6 +193,7 @@ pub struct Llama2CheckpointReader<'a> {
 }
 
 impl<'a> Llama2CheckpointReader<'a> {
+    #[allow(dead_code)]
     fn total_bytes(&self) -> usize {
         self.total_bytes
     }
@@ -344,6 +346,7 @@ impl Llama2Tokenizer {
         Ok(String::from_utf8(piece.to_vec()).unwrap())
     }
 
+    #[allow(dead_code)]
     pub fn decode_string(&self, tokens: &[usize]) -> Result<String> {
         let mut result = String::new();
         let mut prev_token = 0;
@@ -556,7 +559,6 @@ impl Llama2Sampler {
         softmax(logits);
 
         // flip a (float) coin (this is our source of entropy for sampling)
-        let coin = rand::random::<f32>();
         let mut rng = rand::thread_rng();
         let coin: f32 = rng.gen_range(0.0..1.0);
 
@@ -712,7 +714,6 @@ impl<'a> Llama2Runner<'a> {
         let hidden_dim = self.conf.hidden_dim;
         let head_size = self.conf.dim / self.conf.n_heads;
         let kv_dim = (self.conf.dim * self.conf.n_kv_heads) / self.conf.n_heads;
-        let kv_mul = self.conf.n_heads / self.conf.n_kv_heads;
 
         // copy the token embedding into x
         let content_row = w.token_embedding_table.at(token)?;
