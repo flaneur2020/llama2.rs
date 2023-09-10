@@ -587,7 +587,7 @@ impl Llama2Sampler {
     pub fn sample_topp(
         probs: &[f32],
         topp: f32,
-        prob_index: &mut Vec<(f32, usize)>,
+        prob_index: &mut [(f32, usize)],
         coin: f32,
     ) -> Result<usize> {
         // top-p sampling (or "nucleus sampling") samples from the smallest set of
