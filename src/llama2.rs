@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::mem;
 use std::ops::Index;
-use std::ops::Range;
 use std::vec;
 
 fn accum(a: &mut [f32], b: &[f32]) {
@@ -545,7 +544,7 @@ impl Llama2Sampler {
             return Self::sample_argmax(logits);
         }
 
-        // apply the temperature to the logits. the lower the temperature, 
+        // apply the temperature to the logits. the lower the temperature,
         // the more deterministic the sampling.
         for logit in logits.iter_mut() {
             *logit /= self.temperature;
@@ -557,7 +556,7 @@ impl Llama2Sampler {
         let coin = rand::random::<f32>();
         let mut rng = rand::thread_rng();
         let coin: f32 = rng.gen_range(0.0..1.0);
-        
+
         // we sample from this distribution to get the next token
         if self.topp <= 0_f32 || self.topp >= 1.0_f32 {
             // simply sample from the predicted probability distribution
@@ -580,7 +579,12 @@ impl Llama2Sampler {
         probs.len() - 1 // in case of rounding errors
     }
 
-    pub fn sample_topp(probs: &[f32], topp: f32, prob_index: &mut Vec<(f32, usize)>, coin: f32) -> Result<usize> {
+    pub fn sample_topp(
+        probs: &[f32],
+        topp: f32,
+        prob_index: &mut Vec<(f32, usize)>,
+        coin: f32,
+    ) -> Result<usize> {
         // top-p sampling (or "nucleus sampling") samples from the smallest set of
         // tokens that exceed probability topp. This way we never sample tokens that
         // have very low probabilities and are less likely to go "off the rails".
@@ -689,7 +693,12 @@ impl<'a> Llama2Runner<'a> {
         }
     }
 
-    pub fn generate(&'a mut self, prompt: &str, steps: usize, sampler: &'a mut Llama2Sampler) -> Result<Llama2RunnerOutputGenerator<'a>> {
+    pub fn generate(
+        &'a mut self,
+        prompt: &str,
+        steps: usize,
+        sampler: &'a mut Llama2Sampler,
+    ) -> Result<Llama2RunnerOutputGenerator<'a>> {
         Llama2RunnerOutputGenerator::new(self, sampler, prompt, steps)
     }
 
@@ -848,7 +857,7 @@ impl<'a> Llama2RunnerOutputGenerator<'a> {
     }
 
     fn forward_next(&mut self) -> Result<Option<String>> {
-        if self.pos >= self.steps {
+        if self.pos >= self.steps + self.prompt_tokens.len() {
             return Ok(None);
         }
 
@@ -889,7 +898,7 @@ impl<'a> Iterator for Llama2RunnerOutputGenerator<'a> {
             let r = self.forward_next().transpose();
             if let Some(Ok(s)) = &r {
                 if s == "" {
-                    continue
+                    continue;
                 }
             }
             return r;

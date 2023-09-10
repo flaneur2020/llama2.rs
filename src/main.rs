@@ -1,6 +1,9 @@
 mod llama2;
+use crate::llama2::{
+    Llama2CheckpointLoader, Llama2Runner, Llama2Sampler, Llama2TokenizerLoader, Result,
+};
 use clap::Parser;
-use crate::llama2::{Llama2CheckpointLoader, Llama2TokenizerLoader, Llama2Sampler, Llama2Runner, Result};
+use std::io::Write;
 
 #[derive(Parser, Debug)]
 struct CommandArgs {
@@ -11,6 +14,10 @@ struct CommandArgs {
     // The tokenizer file to load
     #[arg(short, long, default_value_t = format!("./testdata/tokenizer.bin"))]
     tokenizer: String,
+
+    // The number of tokens to generate
+    #[arg(short, long, default_value_t = 15)]
+    steps: usize,
 
     /// The prompt
     prompt: String,
@@ -26,9 +33,10 @@ fn main() -> Result<()> {
     let tokenizer = tokenizer_loader.load(conf.vocab_size)?;
     let mut sampler = Llama2Sampler::new(conf.vocab_size, 0.0, 0.0);
     let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
-    let output = runner.generate(&args.prompt, 15, &mut sampler)?;
+    let output = runner.generate(&args.prompt, args.steps, &mut sampler)?;
     for token in output {
         print!("{}", token?);
+        std::io::stdout().flush().unwrap();
     }
 
     Ok(())
