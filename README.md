@@ -2,10 +2,9 @@
 
 An rust reimplementatin of <https://github.com/karpathy/llama2.c>.
 
-## TODO
+## Run locally
 
-- [x] Llama2Runner
-- [x] tokenizer
-- [x] generate
-- [x] samplers
-- [ ] cli
+```bash
+cargo run --release
+./target/release/llama2-rs "rust is a crab"
+```

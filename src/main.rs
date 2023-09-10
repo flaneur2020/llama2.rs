@@ -14,7 +14,7 @@ struct CommandArgs {
     tokenizer: String,
 
     // The number of tokens to generate
-    #[arg(short, long, default_value_t = 15)]
+    #[arg(short, long, default_value_t = 300)]
     steps: usize,
 
     /// The prompt
