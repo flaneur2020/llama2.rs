@@ -1066,7 +1066,7 @@ mod tests {
         let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
         let output = runner.generate("hello, world", 15, &mut sampler)?;
         let s = output.collect::<Result<Vec<String>>>()?.join("");
-        assert_eq!(s, "ers. They were very friendly and always had a smile on");
+        assert_eq!(s, "ers. They were very friendly and always had a smile on their faces. One");
         Ok(())
     }
 }
