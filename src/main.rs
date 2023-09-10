@@ -1,5 +1,5 @@
 mod llama2;
-use crate::llama2::{
+use llama2::{
     Llama2CheckpointLoader, Llama2Runner, Llama2Sampler, Llama2TokenizerLoader, Result,
 };
 use clap::Parser;
@@ -33,11 +33,13 @@ fn main() -> Result<()> {
     let tokenizer = tokenizer_loader.load(conf.vocab_size)?;
     let mut sampler = Llama2Sampler::new(conf.vocab_size, 0.0, 0.0);
     let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
-    let output = runner.generate(&args.prompt, args.steps, &mut sampler)?;
-    for token in output {
+    let mut output = runner.generate(&args.prompt, args.steps, &mut sampler)?;
+    for token in output.by_ref() {
         print!("{}", token?);
         std::io::stdout().flush().unwrap();
     }
+    println!();
+    println!("{} tokens/s", output.average_tokens_per_seconds());
 
     Ok(())
 }

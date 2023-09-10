@@ -5,6 +5,9 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::mem;
 use std::ops::Index;
+use std::ops::AddAssign;
+use std::time::Duration;
+use std::time::Instant;
 use std::vec;
 
 fn accum(a: &mut [f32], b: &[f32]) {
@@ -827,6 +830,7 @@ pub struct Llama2RunnerOutputGenerator<'a> {
     token: usize,
     sampler: &'a mut Llama2Sampler,
     runner: &'a mut Llama2Runner<'a>,
+    total_time: Duration,
 }
 
 impl<'a> Llama2RunnerOutputGenerator<'a> {
@@ -853,7 +857,13 @@ impl<'a> Llama2RunnerOutputGenerator<'a> {
             prompt_tokens,
             sampler,
             runner,
+            total_time: Duration::new(0, 0),
         })
+    }
+
+    pub fn average_tokens_per_seconds(&self) -> f32 {
+        let total_time = self.total_time.as_secs_f32();
+        self.pos as f32 / total_time
     }
 
     fn forward_next(&mut self) -> Result<Option<String>> {
@@ -862,6 +872,7 @@ impl<'a> Llama2RunnerOutputGenerator<'a> {
         }
 
         // forward the transformer to get logits for the next token
+        let start_time = Instant::now();
         let logits = self.runner.forward(self.token, self.pos)?;
 
         // advance the state state machine
@@ -873,6 +884,8 @@ impl<'a> Llama2RunnerOutputGenerator<'a> {
             let token = self.sampler.sample(logits)?;
             (token, false)
         };
+        self.total_time.add_assign(start_time.elapsed());
+
         // data-dependent terminating condition: the BOS (=1) token delimits sequences
         if next_token == 1 {
             return Ok(None);
