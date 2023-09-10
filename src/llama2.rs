@@ -55,7 +55,7 @@ fn matmul(xout: &mut [f32], x: &[f32], w: impl Index<(usize, usize), Output = f3
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum Llama2ErrorKind {
+pub enum Llama2ErrorKind {
     IOError,
     BadInput,
     Unexpected,
@@ -63,7 +63,7 @@ enum Llama2ErrorKind {
 }
 
 #[derive(Debug)]
-struct Llama2Error {
+pub struct Llama2Error {
     kind: Llama2ErrorKind,
     message: String,
     source: Option<Box<dyn std::error::Error>>,
@@ -85,7 +85,7 @@ impl std::error::Error for Llama2Error {
     }
 }
 
-type Result<T> = std::result::Result<T, Llama2Error>;
+pub type Result<T> = std::result::Result<T, Llama2Error>;
 
 #[derive(Debug, Default, Clone)]
 struct Tensor<'a> {
@@ -149,18 +149,18 @@ impl Index<(usize, usize)> for &Tensor<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-struct Llama2Config {
-    dim: usize,
-    hidden_dim: usize,
-    n_layers: usize,
-    n_heads: usize,
-    n_kv_heads: usize,
-    vocab_size: usize,
-    seq_len: usize,
+pub struct Llama2Config {
+    pub dim: usize,
+    pub hidden_dim: usize,
+    pub n_layers: usize,
+    pub n_heads: usize,
+    pub n_kv_heads: usize,
+    pub vocab_size: usize,
+    pub seq_len: usize,
 }
 
 #[derive(Default)]
-struct Llama2Weights<'a> {
+pub struct Llama2Weights<'a> {
     // token embedding table
     token_embedding_table: Tensor<'a>, // (vocab_size, dim)
     // weights for rmsnorms
@@ -184,7 +184,7 @@ struct Llama2Weights<'a> {
     wcls: Tensor<'a>, // (vocab_size, dim)
 }
 
-struct Llama2CheckpointReader<'a> {
+pub struct Llama2CheckpointReader<'a> {
     buf: &'a [u8],
     total_bytes: usize,
 }
@@ -228,12 +228,12 @@ impl<'a> Llama2CheckpointReader<'a> {
     }
 }
 
-struct Llama2CheckpointLoader {
+pub struct Llama2CheckpointLoader {
     mmap: Mmap,
 }
 
 impl Llama2CheckpointLoader {
-    fn new(path: &str) -> Result<Self> {
+    pub fn new(path: &str) -> Result<Self> {
         let file = File::open(path).or_else(|e| {
             Err(Llama2Error {
                 kind: Llama2ErrorKind::IOError,
@@ -315,7 +315,7 @@ impl Llama2CheckpointLoader {
     }
 }
 
-struct Llama2Tokenizer {
+pub struct Llama2Tokenizer {
     vocab: Vec<String>,
     vocab_scores: Vec<f32>,
     max_token_length: usize,
@@ -429,7 +429,7 @@ impl Llama2Tokenizer {
     }
 }
 
-struct Llama2TokenizerLoader {
+pub struct Llama2TokenizerLoader {
     r: Box<dyn std::io::Read>,
 }
 
@@ -446,7 +446,7 @@ impl Llama2TokenizerLoader {
         Ok(Self { r: Box::new(f) })
     }
 
-    fn load(&mut self, vocab_size: usize) -> Result<Llama2Tokenizer> {
+    pub fn load(&mut self, vocab_size: usize) -> Result<Llama2Tokenizer> {
         let mut vocabs = vec![String::new(); vocab_size];
         let mut vocab_scores = vec![0.0; vocab_size];
         let mut byte_pieces = [0u8; 256];
@@ -525,7 +525,7 @@ impl Llama2TokenizerLoader {
     }
 }
 
-struct Llama2Sampler {
+pub struct Llama2Sampler {
     prob_index: Vec<(f32, usize)>,
     temperature: f32,
     topp: f32,
@@ -649,7 +649,7 @@ struct Llama2State {
     value_cache: Vec<Vec<Vec<f32>>>, // (layer, seq_len, dim)
 }
 
-struct Llama2Runner<'a> {
+pub struct Llama2Runner<'a> {
     conf: Llama2Config,
     state: Llama2State,
     weights: Llama2Weights<'a>,
@@ -811,7 +811,7 @@ impl<'a> Llama2Runner<'a> {
     }
 }
 
-struct Llama2RunnerOutputGenerator<'a> {
+pub struct Llama2RunnerOutputGenerator<'a> {
     pos: usize,
     steps: usize,
     prompt_tokens: Vec<usize>,
