@@ -1,2 +1,2 @@
-- [ ] sample args in cli
+- [x] sample args in cli
 - [ ] execute llama6b
