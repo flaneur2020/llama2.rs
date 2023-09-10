@@ -847,6 +847,92 @@ impl<'a> Llama2Runner<'a> {
     }
 }
 
+struct Llama2RunnerOutputGenerator<'a> {
+    pos: usize,
+    steps: usize,
+    prompt_tokens: Vec<usize>,
+    token: usize,
+    sampler: &'a mut Llama2Sampler,
+    runner: &'a mut Llama2Runner<'a>,
+}
+
+impl<'a> Llama2RunnerOutputGenerator<'a> {
+    fn new(
+        runner: &'a mut Llama2Runner<'a>,
+        sampler: &'a mut Llama2Sampler,
+        prompt: &str,
+        steps: usize,
+    ) -> Result<Self> {
+        let prompt_tokens = runner.tokenizer.encode(prompt, true, false)?;
+        if prompt_tokens.len() < 1 {
+            return Err(Llama2Error {
+                kind: Llama2ErrorKind::BadInput,
+                message: format!("something is wrong, expected at least 1 prompt token"),
+                source: None,
+            });
+        }
+
+        let token = prompt_tokens[0];
+        Ok(Self {
+            pos: 0,
+            steps,
+            token,
+            prompt_tokens,
+            sampler,
+            runner,
+        })
+    }
+
+    fn forward_next(&mut self) -> Result<Option<String>> {
+        if self.pos >= self.steps {
+            return Ok(None);
+        }
+
+        // forward the transformer to get logits for the next token
+        let logits = self.runner.forward(self.token, self.pos)?;
+
+        // advance the state state machine
+        let (next_token, is_prompt) = if self.pos < self.prompt_tokens.len() - 1 {
+            // if we are still processing the input prompt, force the next prompt token
+            (self.prompt_tokens[self.pos + 1], true)
+        } else {
+            // otherwise sample the next token from the logits
+            let token = self.sampler.sample(logits)?;
+            (token, false)
+        };
+        // data-dependent terminating condition: the BOS (=1) token delimits sequences
+        if next_token == 1 {
+            return Ok(None);
+        }
+
+        let prev_token = self.token;
+        self.pos += 1;
+        self.token = next_token;
+
+        if is_prompt {
+            return Ok(Some("".to_string()));
+        }
+
+        Ok(Some(self.runner.tokenizer.decode(prev_token, self.token)?))
+    }
+}
+
+impl<'a> Iterator for Llama2RunnerOutputGenerator<'a> {
+    type Item = Result<String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let r = self.forward_next().transpose();
+            if let Some(Ok(s)) = &r {
+                if s == "" {
+                    continue
+                }
+            }
+            return r;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
