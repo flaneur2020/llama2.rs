@@ -3,6 +3,7 @@ build:
 
 check:
 	cargo check
+	cargo clippy -- -A clippy::needless_range_loop
 
 fmt:
 	cargo fmt

@@ -4,8 +4,8 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::fs::File;
 use std::mem;
-use std::ops::AddAssign;
 use std::ops::Index;
+use std::ops::AddAssign;
 use std::time::Duration;
 use std::time::Instant;
 use std::vec;
@@ -84,7 +84,7 @@ impl std::fmt::Display for Llama2Error {
 
 impl std::error::Error for Llama2Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.as_deref()
+        self.source.as_ref().map(|e| &**e)
     }
 }
 
@@ -238,16 +238,20 @@ pub struct Llama2CheckpointLoader {
 
 impl Llama2CheckpointLoader {
     pub fn new(path: &str) -> Result<Self> {
-        let file = File::open(path).map_err(|e| Llama2Error {
-            kind: Llama2ErrorKind::IOError,
-            message: format!("failed to open file {}: {}", path, e),
-            source: Some(Box::new(e)),
+        let file = File::open(path).map_err(|e| {
+            Llama2Error {
+                kind: Llama2ErrorKind::IOError,
+                message: format!("failed to open file {}: {}", path, e),
+                source: Some(Box::new(e)),
+            }
         })?;
         let mmap = unsafe {
-            MmapOptions::new().map(&file).map_err(|e| Llama2Error {
-                kind: Llama2ErrorKind::IOError,
-                message: format!("failed to mmap file {}: {}", path, e),
-                source: Some(Box::new(e)),
+            MmapOptions::new().map(&file).map_err(|e| {
+                Llama2Error {
+                    kind: Llama2ErrorKind::IOError,
+                    message: format!("failed to mmap file {}: {}", path, e),
+                    source: Some(Box::new(e)),
+                }
             })?
         };
         Ok(Self { mmap })
@@ -267,7 +271,7 @@ impl Llama2CheckpointLoader {
         }
     }
 
-    pub(crate) fn load_config(r: &mut Llama2CheckpointReader<'_>) -> Result<Llama2Config> {
+    pub(crate) fn load_config<'a>(r: &mut Llama2CheckpointReader<'a>) -> Result<Llama2Config> {
         let dim = r.read_i32()? as usize;
         let hidden_dim = r.read_i32()? as usize;
         let n_layers = r.read_i32()? as usize;
@@ -325,7 +329,7 @@ pub struct Llama2Tokenizer {
 
 impl Llama2Tokenizer {
     pub fn decode(&self, prev_token: usize, token: usize) -> Result<String> {
-        let mut piece: &[u8] = self.vocab[token].as_bytes();
+        let mut piece: &[u8] = &self.vocab[token].as_bytes();
         // following BOS (1) token, sentencepiece decoder strips any leading whitespace (see PR #89)
         if prev_token == 1 && piece[0] == b' ' {
             piece = &piece[1..];
@@ -335,7 +339,7 @@ impl Llama2Tokenizer {
         if piece.starts_with(b"<0x") && piece[piece.len() - 1] == b'>' {
             let s = String::from_utf8_lossy(&piece[1..piece.len() - 1]);
             let s = s.trim_start_matches("0x");
-            if let Ok(byte) = u8::from_str_radix(s, 16) {
+            if let Ok(byte) = u8::from_str_radix(&s, 16) {
                 piece = &self.byte_pieces[(byte as usize)..(byte as usize) + 1]
             }
         }
@@ -370,13 +374,13 @@ impl Llama2Tokenizer {
         // so prepend a dummy prefix token to the input string, but only if text != ""
         // TODO: pretty sure this isn't correct in the general case but I don't have the
         // energy to read more of the sentencepiece code to figure out what it's doing
-        if !text.starts_with('\u{0}') {
+        if text.chars().next().unwrap() != '\0' {
             let dummy_prefix = self.vocab_index.get(" ").unwrap();
             tokens.push(*dummy_prefix);
         }
 
-        let chars = text.chars();
-        for ch in chars {
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
             str_buf.clear();
             str_buf.push(ch);
             if let Some(tok) = self.vocab_index.get(&str_buf) {
@@ -436,10 +440,12 @@ pub struct Llama2TokenizerLoader {
 
 impl Llama2TokenizerLoader {
     pub fn new(path: &str) -> Result<Self> {
-        let f = std::fs::File::open(path).map_err(|e| Llama2Error {
-            kind: Llama2ErrorKind::IOError,
-            message: format!("failed to open file {}: {}", path, e),
-            source: Some(Box::new(e)),
+        let f = std::fs::File::open(path).map_err(|e| {
+            Llama2Error {
+                kind: Llama2ErrorKind::IOError,
+                message: format!("failed to open file {}: {}", path, e),
+                source: Some(Box::new(e)),
+            }
         })?;
         let f = std::io::BufReader::new(f);
         Ok(Self { r: Box::new(f) })
@@ -478,40 +484,48 @@ impl Llama2TokenizerLoader {
 
     fn read_i32(&mut self) -> Result<i32> {
         let mut buf = [0u8; 4];
-        self.r.read_exact(&mut buf).map_err(|e| Llama2Error {
-            kind: Llama2ErrorKind::IOError,
-            message: format!("failed to read i32: {}", e),
-            source: Some(Box::new(e)),
+        self.r.read_exact(&mut buf).map_err(|e| {
+            Llama2Error {
+                kind: Llama2ErrorKind::IOError,
+                message: format!("failed to read i32: {}", e),
+                source: Some(Box::new(e)),
+            }
         })?;
         Ok(i32::from_le_bytes(buf))
     }
 
     fn read_f32(&mut self) -> Result<f32> {
         let mut buf = [0u8; 4];
-        self.r.read_exact(&mut buf).map_err(|e| Llama2Error {
-            kind: Llama2ErrorKind::IOError,
-            message: format!("failed to read f32: {}", e),
-            source: Some(Box::new(e)),
+        self.r.read_exact(&mut buf).map_err(|e| {
+            Llama2Error {
+                kind: Llama2ErrorKind::IOError,
+                message: format!("failed to read f32: {}", e),
+                source: Some(Box::new(e)),
+            }
         })?;
         Ok(f32::from_le_bytes(buf))
     }
 
     fn read_bytes(&mut self, len: usize) -> Result<Vec<u8>> {
         let mut buf = vec![0u8; len];
-        self.r.read_exact(&mut buf).map_err(|e| Llama2Error {
-            kind: Llama2ErrorKind::IOError,
-            message: format!("failed to read bytes: {}", e),
-            source: Some(Box::new(e)),
+        self.r.read_exact(&mut buf).map_err(|e| {
+            Llama2Error {
+                kind: Llama2ErrorKind::IOError,
+                message: format!("failed to read bytes: {}", e),
+                source: Some(Box::new(e)),
+            }
         })?;
         Ok(buf)
     }
 
     fn read_string(&mut self, len: usize) -> Result<String> {
         let buf = self.read_bytes(len)?;
-        String::from_utf8(buf).map_err(|e| Llama2Error {
-            kind: Llama2ErrorKind::IOError,
-            message: format!("failed to read string: {}", e),
-            source: Some(Box::new(e)),
+        String::from_utf8(buf).map_err(|e| {
+            Llama2Error {
+                kind: Llama2ErrorKind::IOError,
+                message: format!("failed to read string: {}", e),
+                source: Some(Box::new(e)),
+            }
         })
     }
 }
