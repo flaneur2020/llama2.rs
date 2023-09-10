@@ -84,7 +84,7 @@ impl std::fmt::Display for Llama2Error {
 
 impl std::error::Error for Llama2Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.as_ref().map(|e| &**e)
+        self.source.as_deref()
     }
 }
 
@@ -271,7 +271,7 @@ impl Llama2CheckpointLoader {
         }
     }
 
-    pub(crate) fn load_config<'a>(r: &mut Llama2CheckpointReader<'a>) -> Result<Llama2Config> {
+    pub(crate) fn load_config(r: &mut Llama2CheckpointReader<'_>) -> Result<Llama2Config> {
         let dim = r.read_i32()? as usize;
         let hidden_dim = r.read_i32()? as usize;
         let n_layers = r.read_i32()? as usize;
@@ -329,7 +329,7 @@ pub struct Llama2Tokenizer {
 
 impl Llama2Tokenizer {
     pub fn decode(&self, prev_token: usize, token: usize) -> Result<String> {
-        let mut piece: &[u8] = &self.vocab[token].as_bytes();
+        let mut piece: &[u8] = self.vocab[token].as_bytes();
         // following BOS (1) token, sentencepiece decoder strips any leading whitespace (see PR #89)
         if prev_token == 1 && piece[0] == b' ' {
             piece = &piece[1..];
@@ -339,7 +339,7 @@ impl Llama2Tokenizer {
         if piece.starts_with(b"<0x") && piece[piece.len() - 1] == b'>' {
             let s = String::from_utf8_lossy(&piece[1..piece.len() - 1]);
             let s = s.trim_start_matches("0x");
-            if let Ok(byte) = u8::from_str_radix(&s, 16) {
+            if let Ok(byte) = u8::from_str_radix(s, 16) {
                 piece = &self.byte_pieces[(byte as usize)..(byte as usize) + 1]
             }
         }
@@ -374,13 +374,13 @@ impl Llama2Tokenizer {
         // so prepend a dummy prefix token to the input string, but only if text != ""
         // TODO: pretty sure this isn't correct in the general case but I don't have the
         // energy to read more of the sentencepiece code to figure out what it's doing
-        if text.chars().next().unwrap() != '\0' {
+        if !text.starts_with('\u{0}') {
             let dummy_prefix = self.vocab_index.get(" ").unwrap();
             tokens.push(*dummy_prefix);
         }
 
-        let mut chars = text.chars();
-        while let Some(ch) = chars.next() {
+        let chars = text.chars();
+        for ch in chars {
             str_buf.clear();
             str_buf.push(ch);
             if let Some(tok) = self.vocab_index.get(&str_buf) {
