@@ -9,6 +9,6 @@ fmt:
 	cargo fmt
 
 test:
-	cargo test
+	cargo test --verbose
 
 .PHONY: check fmt test build
