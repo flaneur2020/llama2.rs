@@ -1,2 +1,2 @@
-- [x] sample args in cli
+- [ ] parallel multihead
 - [ ] execute llama6b
