@@ -4,8 +4,8 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::fs::File;
 use std::mem;
-use std::ops::Index;
 use std::ops::AddAssign;
+use std::ops::Index;
 use std::time::Duration;
 use std::time::Instant;
 use std::vec;
@@ -238,20 +238,16 @@ pub struct Llama2CheckpointLoader {
 
 impl Llama2CheckpointLoader {
     pub fn new(path: &str) -> Result<Self> {
-        let file = File::open(path).map_err(|e| {
-            Llama2Error {
-                kind: Llama2ErrorKind::IOError,
-                message: format!("failed to open file {}: {}", path, e),
-                source: Some(Box::new(e)),
-            }
+        let file = File::open(path).map_err(|e| Llama2Error {
+            kind: Llama2ErrorKind::IOError,
+            message: format!("failed to open file {}: {}", path, e),
+            source: Some(Box::new(e)),
         })?;
         let mmap = unsafe {
-            MmapOptions::new().map(&file).map_err(|e| {
-                Llama2Error {
-                    kind: Llama2ErrorKind::IOError,
-                    message: format!("failed to mmap file {}: {}", path, e),
-                    source: Some(Box::new(e)),
-                }
+            MmapOptions::new().map(&file).map_err(|e| Llama2Error {
+                kind: Llama2ErrorKind::IOError,
+                message: format!("failed to mmap file {}: {}", path, e),
+                source: Some(Box::new(e)),
             })?
         };
         Ok(Self { mmap })
@@ -440,12 +436,10 @@ pub struct Llama2TokenizerLoader {
 
 impl Llama2TokenizerLoader {
     pub fn new(path: &str) -> Result<Self> {
-        let f = std::fs::File::open(path).map_err(|e| {
-            Llama2Error {
-                kind: Llama2ErrorKind::IOError,
-                message: format!("failed to open file {}: {}", path, e),
-                source: Some(Box::new(e)),
-            }
+        let f = std::fs::File::open(path).map_err(|e| Llama2Error {
+            kind: Llama2ErrorKind::IOError,
+            message: format!("failed to open file {}: {}", path, e),
+            source: Some(Box::new(e)),
         })?;
         let f = std::io::BufReader::new(f);
         Ok(Self { r: Box::new(f) })
@@ -484,48 +478,40 @@ impl Llama2TokenizerLoader {
 
     fn read_i32(&mut self) -> Result<i32> {
         let mut buf = [0u8; 4];
-        self.r.read_exact(&mut buf).map_err(|e| {
-            Llama2Error {
-                kind: Llama2ErrorKind::IOError,
-                message: format!("failed to read i32: {}", e),
-                source: Some(Box::new(e)),
-            }
+        self.r.read_exact(&mut buf).map_err(|e| Llama2Error {
+            kind: Llama2ErrorKind::IOError,
+            message: format!("failed to read i32: {}", e),
+            source: Some(Box::new(e)),
         })?;
         Ok(i32::from_le_bytes(buf))
     }
 
     fn read_f32(&mut self) -> Result<f32> {
         let mut buf = [0u8; 4];
-        self.r.read_exact(&mut buf).map_err(|e| {
-            Llama2Error {
-                kind: Llama2ErrorKind::IOError,
-                message: format!("failed to read f32: {}", e),
-                source: Some(Box::new(e)),
-            }
+        self.r.read_exact(&mut buf).map_err(|e| Llama2Error {
+            kind: Llama2ErrorKind::IOError,
+            message: format!("failed to read f32: {}", e),
+            source: Some(Box::new(e)),
         })?;
         Ok(f32::from_le_bytes(buf))
     }
 
     fn read_bytes(&mut self, len: usize) -> Result<Vec<u8>> {
         let mut buf = vec![0u8; len];
-        self.r.read_exact(&mut buf).map_err(|e| {
-            Llama2Error {
-                kind: Llama2ErrorKind::IOError,
-                message: format!("failed to read bytes: {}", e),
-                source: Some(Box::new(e)),
-            }
+        self.r.read_exact(&mut buf).map_err(|e| Llama2Error {
+            kind: Llama2ErrorKind::IOError,
+            message: format!("failed to read bytes: {}", e),
+            source: Some(Box::new(e)),
         })?;
         Ok(buf)
     }
 
     fn read_string(&mut self, len: usize) -> Result<String> {
         let buf = self.read_bytes(len)?;
-        String::from_utf8(buf).map_err(|e| {
-            Llama2Error {
-                kind: Llama2ErrorKind::IOError,
-                message: format!("failed to read string: {}", e),
-                source: Some(Box::new(e)),
-            }
+        String::from_utf8(buf).map_err(|e| Llama2Error {
+            kind: Llama2ErrorKind::IOError,
+            message: format!("failed to read string: {}", e),
+            source: Some(Box::new(e)),
         })
     }
 }
@@ -707,41 +693,93 @@ impl<'a> Llama2Runner<'a> {
         Llama2RunnerOutputGenerator::new(self, sampler, prompt, steps, self.conf.seq_len)
     }
 
+    fn head_size(&self) -> usize {
+        self.conf.dim / self.conf.n_heads
+    }
+
+    fn kv_dim(&self) -> usize {
+        (self.conf.dim * self.conf.n_kv_heads) / self.conf.n_heads
+    }
+
+    fn rope(&mut self, l: usize, pos: usize) {
+        for i in (0..self.conf.dim).step_by(2) {
+            let head_dim = i % self.head_size();
+            let freq = 1.0 / 10000_f32.powf(head_dim as f32 / self.head_size() as f32);
+            let val = pos as f32 * freq;
+            let fcr = val.cos();
+            let fci = val.sin();
+            let rotn = if i < self.kv_dim() { 2 } else { 1 }; // how many vectors? 2 = q & k, 1 = q only
+            for v in 0..rotn {
+                let vec = if v == 0 {
+                    &mut self.state.q
+                } else {
+                    &mut self.state.k
+                };
+                let v0 = vec[i];
+                let v1 = vec[i + 1];
+                vec[i] = v0 * fcr - v1 * fci;
+                vec[i + 1] = v0 * fci + v1 * fcr;
+            }
+        }
+    }
+
+    fn attention_head(&mut self, l: usize, h: usize, pos: usize) {
+        let head_size = self.head_size();
+
+        // get the query vector for this head
+        let q = &self.state.q[h * head_size..h * head_size + head_size];
+        //  attention scores for this head
+        let att = &mut self.state.att[h];
+        // iterate over all timesteps, including the current one
+        for t in 0..(pos + 1) {
+            let k = &self.state.key_cache[l][t][h * head_size..h * head_size + head_size];
+            // calculate the attention score as the dot product of q and k
+            let mut score = (0..head_size).map(|i| q[i] * k[i]).sum::<f32>();
+            score /= (head_size as f32).sqrt();
+            // save the score to the attention buffer
+            att[t] = score;
+        }
+
+        // softmax the scores to get attention weights, from 0..pos inclusively
+        softmax(&mut att[0..pos + 1]);
+
+        // weighted sum of the values, store back into xb
+        let xb = &mut self.state.xb[h * head_size..h * head_size + head_size];
+        xb.fill(0.0);
+        for t in 0..pos + 1 {
+            let v = &self.state.value_cache[l][t][h * head_size..h * head_size + head_size];
+            // get the attention weight for this timestep
+            let a = att[t];
+            // accumulate the weighted value into xb
+            for i in 0..head_size {
+                xb[i] += a * v[i]
+            }
+        }
+    }
+
     pub fn forward(&mut self, token: usize, pos: usize) -> Result<&mut [f32]> {
         // a few convenience variables
-        let w = &self.weights;
         let hidden_dim = self.conf.hidden_dim;
-        let head_size = self.conf.dim / self.conf.n_heads;
-        let kv_dim = (self.conf.dim * self.conf.n_kv_heads) / self.conf.n_heads;
+        let kv_dim = self.kv_dim();
 
         // copy the token embedding into x
-        let content_row = w.token_embedding_table.at(token)?;
+        let content_row = self.weights.token_embedding_table.at(token)?;
         self.state.x.copy_from_slice(content_row.flat());
 
         // forward all the layers
         for l in 0..self.conf.n_layers {
             // attention rmsnorm
-            rmsnorm(&mut self.state.xb, &self.state.x, w.rms_att_weight.at(l)?.flat());
-            matmul(&mut self.state.q, &self.state.xb, &w.wq.at(l)?);
-            matmul(&mut self.state.k, &self.state.xb, &w.wk.at(l)?);
-            matmul(&mut self.state.v, &self.state.xb, &w.wv.at(l)?);
+            rmsnorm(
+                &mut self.state.xb,
+                &self.state.x,
+                self.weights.rms_att_weight.at(l)?.flat(),
+            );
+            matmul(&mut self.state.q, &self.state.xb, &self.weights.wq.at(l)?);
+            matmul(&mut self.state.k, &self.state.xb, &self.weights.wk.at(l)?);
+            matmul(&mut self.state.v, &self.state.xb, &self.weights.wv.at(l)?);
 
             // RoPE relative positional encoding: complex-valued rotate q and k by freq_cis in each head
-            for i in (0..self.conf.dim).step_by(2) {
-                let head_dim = i % head_size;
-                let freq = 1.0 / 10000_f32.powf(head_dim as f32 / head_size as f32);
-                let val = pos as f32 * freq;
-                let fcr = val.cos();
-                let fci = val.sin();
-                let rotn = if i < kv_dim { 2 } else { 1 }; // how many vectors? 2 = q & k, 1 = q only
-                for v in 0..rotn {
-                    let vec = if v == 0 { &mut self.state.q } else { &mut self.state.k };
-                    let v0 = vec[i];
-                    let v1 = vec[i + 1];
-                    vec[i] = v0 * fcr - v1 * fci;
-                    vec[i + 1] = v0 * fci + v1 * fcr;
-                }
-            }
+            self.rope(l, pos);
 
             // save key,value at this time step (pos) to our kv cache
             let key_cache_row = &mut self.state.key_cache[l][pos];
@@ -751,50 +789,26 @@ impl<'a> Llama2Runner<'a> {
 
             // multihead attention. iterate over all heads
             for h in 0..self.conf.n_heads {
-                // get the query vector for this head
-                let q = &self.state.q[h * head_size..h * head_size + head_size];
-                //  attention scores for this head
-                let att = &mut self.state.att[h];
-                // iterate over all timesteps, including the current one
-                for t in 0..(pos + 1) {
-                    let k = &self.state.key_cache[l][t][h * head_size..h * head_size + head_size];
-                    // calculate the attention score as the dot product of q and k
-                    let mut score = (0..head_size).map(|i| q[i] * k[i]).sum::<f32>();
-                    score /= (head_size as f32).sqrt();
-                    // save the score to the attention buffer
-                    att[t] = score;
-                }
-
-                // softmax the scores to get attention weights, from 0..pos inclusively
-                softmax(&mut att[0..pos + 1]);
-
-                // weighted sum of the values, store back into xb
-                let xb = &mut self.state.xb[h * head_size..h * head_size + head_size];
-                xb.fill(0.0);
-                for t in 0..pos + 1 {
-                    let v = &self.state.value_cache[l][t][h * head_size..h * head_size + head_size];
-                    // get the attention weight for this timestep
-                    let a = att[t];
-                    // accumulate the weighted value into xb
-                    for i in 0..head_size {
-                        xb[i] += a * v[i]
-                    }
-                }
+                self.attention_head(l, h, pos);
             }
 
             // final matmul to get the output of the attention
-            matmul(&mut self.state.xb2, &self.state.xb, &w.wo.at(l)?);
+            matmul(&mut self.state.xb2, &self.state.xb, &self.weights.wo.at(l)?);
 
             // residual connection back into x
             accum(&mut self.state.x, &self.state.xb2);
 
             // ffn rmsnorm
-            rmsnorm(&mut self.state.xb, &self.state.x, w.rms_ffn_weight.at(l)?.flat());
+            rmsnorm(
+                &mut self.state.xb,
+                &self.state.x,
+                self.weights.rms_ffn_weight.at(l)?.flat(),
+            );
 
             // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
             // first calculate self.w1(x) and self.w3(x)
-            matmul(&mut self.state.hb, &self.state.xb, &w.w1.at(l)?);
-            matmul(&mut self.state.hb2, &self.state.xb, &w.w3.at(l)?);
+            matmul(&mut self.state.hb, &self.state.xb, &self.weights.w1.at(l)?);
+            matmul(&mut self.state.hb2, &self.state.xb, &self.weights.w3.at(l)?);
 
             // F.silu; silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
             for i in 0..hidden_dim {
@@ -807,17 +821,17 @@ impl<'a> Llama2Runner<'a> {
             }
 
             // final matmul to get the output of the ffn
-            matmul(&mut self.state.xb, &self.state.hb, &w.w2.at(l)?);
+            matmul(&mut self.state.xb, &self.state.hb, &self.weights.w2.at(l)?);
 
             // residual connection
             accum(&mut self.state.x, &self.state.xb);
         }
 
         // final rmsnorm
-        rmsnorm2(&mut self.state.x, w.rms_final_weight.flat());
+        rmsnorm2(&mut self.state.x, self.weights.rms_final_weight.flat());
 
         // classifier into logits
-        matmul(&mut self.state.logits, &self.state.x, &w.wcls);
+        matmul(&mut self.state.logits, &self.state.x, &self.weights.wcls);
 
         Ok(&mut self.state.logits)
     }
@@ -1071,7 +1085,10 @@ mod tests {
         let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
         let output = runner.generate("hello, world", 15, &mut sampler)?;
         let s = output.collect::<Result<Vec<String>>>()?.join("");
-        assert_eq!(s, "ers. They were very friendly and always had a smile on their faces. One");
+        assert_eq!(
+            s,
+            "ers. They were very friendly and always had a smile on their faces. One"
+        );
         Ok(())
     }
 }
