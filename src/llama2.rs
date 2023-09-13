@@ -757,74 +757,86 @@ impl<'a> Llama2Runner<'a> {
         }
     }
 
-    pub fn forward(&mut self, token: usize, pos: usize) -> Result<&mut [f32]> {
-        // a few convenience variables
+    fn ffn(&mut self, l: usize) -> Result<()> {
         let hidden_dim = self.conf.hidden_dim;
-        let kv_dim = self.kv_dim();
+        // final matmul to get the output of the attention
+        matmul(&mut self.state.xb2, &self.state.xb, &self.weights.wo.at(l)?);
 
+        // residual connection back into x
+        accum(&mut self.state.x, &self.state.xb2);
+
+        // ffn rmsnorm
+        rmsnorm(
+            &mut self.state.xb,
+            &self.state.x,
+            self.weights.rms_ffn_weight.at(l)?.flat(),
+        );
+
+        // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
+        // first calculate self.w1(x) and self.w3(x)
+        matmul(&mut self.state.hb, &self.state.xb, &self.weights.w1.at(l)?);
+        matmul(&mut self.state.hb2, &self.state.xb, &self.weights.w3.at(l)?);
+
+        // F.silu; silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
+        for i in 0..hidden_dim {
+            self.state.hb[i] = self.state.hb[i] * (1.0 / (1.0 + (-self.state.hb[i]).exp()));
+        }
+
+        // elementwise multiply with w3(x)
+        for i in 0..hidden_dim {
+            self.state.hb[i] *= self.state.hb2[i];
+        }
+
+        // final matmul to get the output of the ffn
+        matmul(&mut self.state.xb, &self.state.hb, &self.weights.w2.at(l)?);
+
+        // residual connection
+        accum(&mut self.state.x, &self.state.xb);
+
+        Ok(())
+    }
+
+    fn matmul_qkv(&mut self, l: usize) -> Result<()> {
+        // attention rmsnorm
+        rmsnorm(
+            &mut self.state.xb,
+            &self.state.x,
+            self.weights.rms_att_weight.at(l)?.flat(),
+        );
+        matmul(&mut self.state.q, &self.state.xb, &self.weights.wq.at(l)?);
+        matmul(&mut self.state.k, &self.state.xb, &self.weights.wk.at(l)?);
+        matmul(&mut self.state.v, &self.state.xb, &self.weights.wv.at(l)?);
+        Ok(())
+    }
+
+    fn kv_cache(&mut self, l: usize, pos: usize) {
+        let kv_dim = self.kv_dim();
+        let key_cache_row = &mut self.state.key_cache[l][pos];
+        let value_cache_row = &mut self.state.value_cache[l][pos];
+        key_cache_row.copy_from_slice(&self.state.k[0..kv_dim]);
+        value_cache_row.copy_from_slice(&self.state.v[0..kv_dim]);
+    }
+
+    pub fn forward(&mut self, token: usize, pos: usize) -> Result<&mut [f32]> {
         // copy the token embedding into x
         let content_row = self.weights.token_embedding_table.at(token)?;
         self.state.x.copy_from_slice(content_row.flat());
 
         // forward all the layers
         for l in 0..self.conf.n_layers {
-            // attention rmsnorm
-            rmsnorm(
-                &mut self.state.xb,
-                &self.state.x,
-                self.weights.rms_att_weight.at(l)?.flat(),
-            );
-            matmul(&mut self.state.q, &self.state.xb, &self.weights.wq.at(l)?);
-            matmul(&mut self.state.k, &self.state.xb, &self.weights.wk.at(l)?);
-            matmul(&mut self.state.v, &self.state.xb, &self.weights.wv.at(l)?);
+            self.matmul_qkv(l)?;
 
             // RoPE relative positional encoding: complex-valued rotate q and k by freq_cis in each head
             self.rope(l, pos);
 
             // save key,value at this time step (pos) to our kv cache
-            let key_cache_row = &mut self.state.key_cache[l][pos];
-            let value_cache_row = &mut self.state.value_cache[l][pos];
-            key_cache_row.copy_from_slice(&self.state.k[0..kv_dim]);
-            value_cache_row.copy_from_slice(&self.state.v[0..kv_dim]);
+            self.kv_cache(l, pos);
 
             // multihead attention. iterate over all heads
             for h in 0..self.conf.n_heads {
                 self.attention_head(l, h, pos);
             }
-
-            // final matmul to get the output of the attention
-            matmul(&mut self.state.xb2, &self.state.xb, &self.weights.wo.at(l)?);
-
-            // residual connection back into x
-            accum(&mut self.state.x, &self.state.xb2);
-
-            // ffn rmsnorm
-            rmsnorm(
-                &mut self.state.xb,
-                &self.state.x,
-                self.weights.rms_ffn_weight.at(l)?.flat(),
-            );
-
-            // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
-            // first calculate self.w1(x) and self.w3(x)
-            matmul(&mut self.state.hb, &self.state.xb, &self.weights.w1.at(l)?);
-            matmul(&mut self.state.hb2, &self.state.xb, &self.weights.w3.at(l)?);
-
-            // F.silu; silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
-            for i in 0..hidden_dim {
-                self.state.hb[i] = self.state.hb[i] * (1.0 / (1.0 + (-self.state.hb[i]).exp()));
-            }
-
-            // elementwise multiply with w3(x)
-            for i in 0..hidden_dim {
-                self.state.hb[i] *= self.state.hb2[i];
-            }
-
-            // final matmul to get the output of the ffn
-            matmul(&mut self.state.xb, &self.state.hb, &self.weights.w2.at(l)?);
-
-            // residual connection
-            accum(&mut self.state.x, &self.state.xb);
+            self.ffn(l)?;
         }
 
         // final rmsnorm
