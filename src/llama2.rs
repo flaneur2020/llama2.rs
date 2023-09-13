@@ -701,7 +701,7 @@ impl<'a> Llama2Runner<'a> {
         (self.conf.dim * self.conf.n_kv_heads) / self.conf.n_heads
     }
 
-    fn rope(&mut self, l: usize, pos: usize) {
+    fn rope(&mut self, pos: usize) {
         for i in (0..self.conf.dim).step_by(2) {
             let head_dim = i % self.head_size();
             let freq = 1.0 / 10000_f32.powf(head_dim as f32 / self.head_size() as f32);
@@ -827,7 +827,7 @@ impl<'a> Llama2Runner<'a> {
             self.matmul_qkv(l)?;
 
             // RoPE relative positional encoding: complex-valued rotate q and k by freq_cis in each head
-            self.rope(l, pos);
+            self.rope(pos);
 
             // save key,value at this time step (pos) to our kv cache
             self.kv_cache(l, pos);
