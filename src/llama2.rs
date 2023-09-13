@@ -709,7 +709,6 @@ impl<'a> Llama2Runner<'a> {
 
     pub fn forward(&mut self, token: usize, pos: usize) -> Result<&mut [f32]> {
         // a few convenience variables
-        let s = &mut self.state;
         let w = &self.weights;
         let hidden_dim = self.conf.hidden_dim;
         let head_size = self.conf.dim / self.conf.n_heads;
@@ -717,15 +716,15 @@ impl<'a> Llama2Runner<'a> {
 
         // copy the token embedding into x
         let content_row = w.token_embedding_table.at(token)?;
-        s.x.copy_from_slice(content_row.flat());
+        self.state.x.copy_from_slice(content_row.flat());
 
         // forward all the layers
         for l in 0..self.conf.n_layers {
             // attention rmsnorm
-            rmsnorm(&mut s.xb, &s.x, w.rms_att_weight.at(l)?.flat());
-            matmul(&mut s.q, &s.xb, &w.wq.at(l)?);
-            matmul(&mut s.k, &s.xb, &w.wk.at(l)?);
-            matmul(&mut s.v, &s.xb, &w.wv.at(l)?);
+            rmsnorm(&mut self.state.xb, &self.state.x, w.rms_att_weight.at(l)?.flat());
+            matmul(&mut self.state.q, &self.state.xb, &w.wq.at(l)?);
+            matmul(&mut self.state.k, &self.state.xb, &w.wk.at(l)?);
+            matmul(&mut self.state.v, &self.state.xb, &w.wv.at(l)?);
 
             // RoPE relative positional encoding: complex-valued rotate q and k by freq_cis in each head
             for i in (0..self.conf.dim).step_by(2) {
@@ -736,7 +735,7 @@ impl<'a> Llama2Runner<'a> {
                 let fci = val.sin();
                 let rotn = if i < kv_dim { 2 } else { 1 }; // how many vectors? 2 = q & k, 1 = q only
                 for v in 0..rotn {
-                    let vec = if v == 0 { &mut s.q } else { &mut s.k };
+                    let vec = if v == 0 { &mut self.state.q } else { &mut self.state.k };
                     let v0 = vec[i];
                     let v1 = vec[i + 1];
                     vec[i] = v0 * fcr - v1 * fci;
@@ -745,20 +744,20 @@ impl<'a> Llama2Runner<'a> {
             }
 
             // save key,value at this time step (pos) to our kv cache
-            let key_cache_row = &mut s.key_cache[l][pos];
-            let value_cache_row = &mut s.value_cache[l][pos];
-            key_cache_row.copy_from_slice(&s.k[0..kv_dim]);
-            value_cache_row.copy_from_slice(&s.v[0..kv_dim]);
+            let key_cache_row = &mut self.state.key_cache[l][pos];
+            let value_cache_row = &mut self.state.value_cache[l][pos];
+            key_cache_row.copy_from_slice(&self.state.k[0..kv_dim]);
+            value_cache_row.copy_from_slice(&self.state.v[0..kv_dim]);
 
             // multihead attention. iterate over all heads
             for h in 0..self.conf.n_heads {
                 // get the query vector for this head
-                let q = &s.q[h * head_size..h * head_size + head_size];
+                let q = &self.state.q[h * head_size..h * head_size + head_size];
                 //  attention scores for this head
-                let att = &mut s.att[h];
+                let att = &mut self.state.att[h];
                 // iterate over all timesteps, including the current one
                 for t in 0..(pos + 1) {
-                    let k = &s.key_cache[l][t][h * head_size..h * head_size + head_size];
+                    let k = &self.state.key_cache[l][t][h * head_size..h * head_size + head_size];
                     // calculate the attention score as the dot product of q and k
                     let mut score = (0..head_size).map(|i| q[i] * k[i]).sum::<f32>();
                     score /= (head_size as f32).sqrt();
@@ -770,10 +769,10 @@ impl<'a> Llama2Runner<'a> {
                 softmax(&mut att[0..pos + 1]);
 
                 // weighted sum of the values, store back into xb
-                let xb = &mut s.xb[h * head_size..h * head_size + head_size];
+                let xb = &mut self.state.xb[h * head_size..h * head_size + head_size];
                 xb.fill(0.0);
                 for t in 0..pos + 1 {
-                    let v = &s.value_cache[l][t][h * head_size..h * head_size + head_size];
+                    let v = &self.state.value_cache[l][t][h * head_size..h * head_size + head_size];
                     // get the attention weight for this timestep
                     let a = att[t];
                     // accumulate the weighted value into xb
@@ -784,43 +783,43 @@ impl<'a> Llama2Runner<'a> {
             }
 
             // final matmul to get the output of the attention
-            matmul(&mut s.xb2, &s.xb, &w.wo.at(l)?);
+            matmul(&mut self.state.xb2, &self.state.xb, &w.wo.at(l)?);
 
             // residual connection back into x
-            accum(&mut s.x, &s.xb2);
+            accum(&mut self.state.x, &self.state.xb2);
 
             // ffn rmsnorm
-            rmsnorm(&mut s.xb, &s.x, w.rms_ffn_weight.at(l)?.flat());
+            rmsnorm(&mut self.state.xb, &self.state.x, w.rms_ffn_weight.at(l)?.flat());
 
             // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
             // first calculate self.w1(x) and self.w3(x)
-            matmul(&mut s.hb, &s.xb, &w.w1.at(l)?);
-            matmul(&mut s.hb2, &s.xb, &w.w3.at(l)?);
+            matmul(&mut self.state.hb, &self.state.xb, &w.w1.at(l)?);
+            matmul(&mut self.state.hb2, &self.state.xb, &w.w3.at(l)?);
 
             // F.silu; silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
             for i in 0..hidden_dim {
-                s.hb[i] = s.hb[i] * (1.0 / (1.0 + (-s.hb[i]).exp()));
+                self.state.hb[i] = self.state.hb[i] * (1.0 / (1.0 + (-self.state.hb[i]).exp()));
             }
 
             // elementwise multiply with w3(x)
             for i in 0..hidden_dim {
-                s.hb[i] *= s.hb2[i];
+                self.state.hb[i] *= self.state.hb2[i];
             }
 
             // final matmul to get the output of the ffn
-            matmul(&mut s.xb, &s.hb, &w.w2.at(l)?);
+            matmul(&mut self.state.xb, &self.state.hb, &w.w2.at(l)?);
 
             // residual connection
-            accum(&mut s.x, &s.xb);
+            accum(&mut self.state.x, &self.state.xb);
         }
 
         // final rmsnorm
-        rmsnorm2(&mut s.x, w.rms_final_weight.flat());
+        rmsnorm2(&mut self.state.x, w.rms_final_weight.flat());
 
         // classifier into logits
-        matmul(&mut s.logits, &s.x, &w.wcls);
+        matmul(&mut self.state.logits, &self.state.x, &w.wcls);
 
-        Ok(&mut s.logits)
+        Ok(&mut self.state.logits)
     }
 }
 
