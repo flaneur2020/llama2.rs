@@ -7,3 +7,4 @@ edition = "2021"
 clap = { version = "4.0", features = ["derive"] }
 memmap = "0.7.0"
 rand = "0.8.5"
+rayon = "1.7.0"

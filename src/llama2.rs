@@ -1,6 +1,7 @@
 use memmap::Mmap;
 use memmap::MmapOptions;
 use rand::Rng;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
 use std::mem;
@@ -637,7 +638,7 @@ struct Llama2State {
     q: Vec<f32>,        // query (dim, )
     k: Vec<f32>,        // key (dim, )
     v: Vec<f32>,        // value (dim, )
-    att: Vec<Vec<f32>>, // buffer for scores/attention values (n_heads, seq_len)
+    attn: Vec<Vec<f32>>, // buffer for scores/attention values (n_heads, seq_len)
     logits: Vec<f32>,   // output logits (vocab_size, )
     // ProbIndex *probindex; // buffer used in top-p sampling
     key_cache: Vec<Vec<Vec<f32>>>,   // (layer, seq_len, dim)
@@ -666,7 +667,7 @@ impl<'a> Llama2Runner<'a> {
             q: vec![0.0; conf.dim],
             k: vec![0.0; conf.dim],
             v: vec![0.0; conf.dim],
-            att: (0..conf.n_heads).map(|_| vec![0.0; conf.dim]).collect(),
+            attn: (0..conf.n_heads).map(|_| vec![0.0; conf.dim]).collect(),
             logits: vec![0.0; conf.vocab_size],
             key_cache: (0..conf.n_layers)
                 .map(|_| (0..conf.seq_len).map(|_| vec![0.0; conf.dim]).collect())
@@ -724,39 +725,40 @@ impl<'a> Llama2Runner<'a> {
     }
 
     fn multi_head_attention(&mut self, l: usize, pos: usize) {
-        for h in 0..self.conf.n_heads {
-            let head_size = self.head_size();
-
-            // get the query vector for this head
-            let q = &self.state.q[h * head_size..h * head_size + head_size];
-            //  attention scores for this head
-            let att = &mut self.state.att[h];
-            // iterate over all timesteps, including the current one
-            for t in 0..(pos + 1) {
-                let k = &self.state.key_cache[l][t][h * head_size..h * head_size + head_size];
-                // calculate the attention score as the dot product of q and k
-                let mut score = (0..head_size).map(|i| q[i] * k[i]).sum::<f32>();
-                score /= (head_size as f32).sqrt();
-                // save the score to the attention buffer
-                att[t] = score;
-            }
-
-            // softmax the scores to get attention weights, from 0..pos inclusively
-            softmax(&mut att[0..pos + 1]);
-
-            // weighted sum of the values, store back into xb
-            let xb = &mut self.state.xb[h * head_size..h * head_size + head_size];
-            xb.fill(0.0);
-            for t in 0..pos + 1 {
-                let v = &self.state.value_cache[l][t][h * head_size..h * head_size + head_size];
-                // get the attention weight for this timestep
-                let a = att[t];
-                // accumulate the weighted value into xb
-                for i in 0..head_size {
-                    xb[i] += a * v[i]
+        let head_size = self.head_size();
+        self.state
+            .attn
+            .par_iter_mut()
+            .zip(self.state.xb.par_chunks_exact_mut(head_size))
+            .enumerate()
+            .for_each(|(h, (attn, xb))| {
+                // get the query vector for this head
+                let q = &self.state.q[h * head_size..h * head_size + head_size];
+                // iterate over all timesteps, including the current one
+                for t in 0..(pos + 1) {
+                    let k = &self.state.key_cache[l][t][h * head_size..h * head_size + head_size];
+                    // calculate the attention score as the dot product of q and k
+                    let mut score = (0..head_size).map(|i| q[i] * k[i]).sum::<f32>();
+                    score /= (head_size as f32).sqrt();
+                    // save the score to the attention buffer
+                    attn[t] = score;
                 }
-            }
-        }
+
+                // softmax the scores to get attention weights, from 0..pos inclusively
+                softmax(&mut attn[0..pos + 1]);
+
+                // weighted sum of the values, store back into xb
+                xb.fill(0.0);
+                for t in 0..pos + 1 {
+                    let v = &self.state.value_cache[l][t][h * head_size..h * head_size + head_size];
+                    // get the attention weight for this timestep
+                    let a = attn[t];
+                    // accumulate the weighted value into xb
+                    for i in 0..head_size {
+                        xb[i] += a * v[i]
+                    }
+                }
+            });
     }
 
     fn ffn(&mut self, l: usize) -> Result<()> {
