@@ -31,6 +31,13 @@ struct CommandArgs {
 fn main() -> Result<()> {
     let args = CommandArgs::parse();
 
+    // configure rayon
+    let cpus = num_cpus::get();
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(cpus)
+        .build_global()
+        .unwrap();
+
     let checkpoint_loader = Llama2CheckpointLoader::new(&args.checkpoint)?;
     let mut tokenizer_loader = Llama2TokenizerLoader::new(&args.tokenizer)?;
 
@@ -44,7 +51,7 @@ fn main() -> Result<()> {
         std::io::stdout().flush().unwrap();
     }
     println!();
-    println!("{} tokens/s", output.average_tokens_per_seconds());
+    println!("{} tokens/s, {} threads", output.average_tokens_per_seconds(), cpus);
 
     Ok(())
 }

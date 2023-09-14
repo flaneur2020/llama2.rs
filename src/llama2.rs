@@ -47,12 +47,13 @@ fn rmsnorm2(x: &mut [f32], w: &[f32]) {
     }
 }
 
-fn matmul(xout: &mut [f32], x: &[f32], w: impl Index<(usize, usize), Output = f32>) {
+fn matmul(xout: &mut [f32], x: &[f32], w: &[f32]) {
     // W (d,n) @ x (n,) -> xout (d,)
+    let x_dim = x.len();
     for i in 0..xout.len() {
         xout[i] = 0.0;
         for j in 0..x.len() {
-            xout[i] += w[(i, j)] * x[j];
+            xout[i] += w[i * x_dim + j] * x[j];
         }
     }
 }
@@ -141,14 +142,6 @@ impl<'a> Tensor<'a> {
             &self.data[start..start + chunk_size],
             self.shape[1..].to_vec(),
         )
-    }
-}
-
-impl Index<(usize, usize)> for &Tensor<'_> {
-    type Output = f32;
-
-    fn index(&self, idx: (usize, usize)) -> &Self::Output {
-        &self.data[idx.0 * self.shape[1] + idx.1]
     }
 }
 
@@ -451,8 +444,8 @@ impl Llama2TokenizerLoader {
         let mut vocab_scores = vec![0.0; vocab_size];
         let mut byte_pieces = [0u8; 256];
 
-        for i in 0..256 {
-            byte_pieces[i] = i as u8;
+        for (i, p) in byte_pieces.iter_mut().enumerate() {
+            *p = i as u8
         }
 
         let max_token_length = self.read_i32()? as usize;
@@ -584,8 +577,8 @@ impl Llama2Sampler {
 
         let cutoff = (1.0_f32 - topp) / (probs.len() - 1) as f32;
         let mut n0 = 0;
-        for i in 0..probs.len() {
-            if probs[i] >= cutoff {
+        for (i, prob) in probs.iter().enumerate() {
+            if *prob >= cutoff {
                 prob_index[n0] = (probs[i], i);
                 n0 += 1;
             }
@@ -595,8 +588,8 @@ impl Llama2Sampler {
         // truncate the list where cumulative probability exceeds topp
         let mut cumulative_prob = 0_f32;
         let mut last_idx = n0 - 1; // in case of rounding errors consider all elements
-        for i in 0..n0 {
-            cumulative_prob += prob_index[i].0;
+        for (i, prob) in prob_index[0..n0].iter().enumerate() {
+            cumulative_prob += prob.0;
             if cumulative_prob > topp {
                 last_idx = i;
                 break; // we've exceeded topp by including last_idx
@@ -606,10 +599,10 @@ impl Llama2Sampler {
         // sample from the truncated list
         let r = coin * cumulative_prob;
         let mut cdf = 0_f32;
-        for i in 0..=last_idx {
-            cdf += prob_index[i].0;
+        for prob in prob_index[0..=last_idx].iter() {
+            cdf += prob.0;
             if cdf > r {
-                return Ok(prob_index[i].1);
+                return Ok(prob.1);
             }
         }
         Ok(prob_index[last_idx].1) // in case of rounding errors
@@ -764,7 +757,7 @@ impl<'a> Llama2Runner<'a> {
     fn ffn(&mut self, l: usize) -> Result<()> {
         let hidden_dim = self.conf.hidden_dim;
         // final matmul to get the output of the attention
-        matmul(&mut self.state.xb2, &self.state.xb, &self.weights.wo.at(l)?);
+        matmul(&mut self.state.xb2, &self.state.xb, self.weights.wo.at(l)?.flat());
 
         // residual connection back into x
         accum(&mut self.state.x, &self.state.xb2);
@@ -778,8 +771,8 @@ impl<'a> Llama2Runner<'a> {
 
         // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
         // first calculate self.w1(x) and self.w3(x)
-        matmul(&mut self.state.hb, &self.state.xb, &self.weights.w1.at(l)?);
-        matmul(&mut self.state.hb2, &self.state.xb, &self.weights.w3.at(l)?);
+        matmul(&mut self.state.hb, &self.state.xb, self.weights.w1.at(l)?.flat());
+        matmul(&mut self.state.hb2, &self.state.xb, self.weights.w3.at(l)?.flat());
 
         // F.silu; silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
         for i in 0..hidden_dim {
@@ -792,7 +785,7 @@ impl<'a> Llama2Runner<'a> {
         }
 
         // final matmul to get the output of the ffn
-        matmul(&mut self.state.xb, &self.state.hb, &self.weights.w2.at(l)?);
+        matmul(&mut self.state.xb, &self.state.hb, &self.weights.w2.at(l)?.flat());
 
         // residual connection
         accum(&mut self.state.x, &self.state.xb);
@@ -807,9 +800,9 @@ impl<'a> Llama2Runner<'a> {
             &self.state.x,
             self.weights.rms_att_weight.at(l)?.flat(),
         );
-        matmul(&mut self.state.q, &self.state.xb, &self.weights.wq.at(l)?);
-        matmul(&mut self.state.k, &self.state.xb, &self.weights.wk.at(l)?);
-        matmul(&mut self.state.v, &self.state.xb, &self.weights.wv.at(l)?);
+        matmul(&mut self.state.q, &self.state.xb, self.weights.wq.at(l)?.flat());
+        matmul(&mut self.state.k, &self.state.xb, self.weights.wk.at(l)?.flat());
+        matmul(&mut self.state.v, &self.state.xb, self.weights.wv.at(l)?.flat());
         Ok(())
     }
 
@@ -847,7 +840,7 @@ impl<'a> Llama2Runner<'a> {
         rmsnorm2(&mut self.state.x, self.weights.rms_final_weight.flat());
 
         // classifier into logits
-        matmul(&mut self.state.logits, &self.state.x, &self.weights.wcls);
+        matmul(&mut self.state.logits, &self.state.x, self.weights.wcls.flat());
 
         Ok(&mut self.state.logits)
     }
@@ -974,7 +967,7 @@ mod tests {
         let w = Tensor::new(&wvec, vec![2, 3]).unwrap(); // (2,3)
         let x = [2.0, 4.0, 8.0]; // (3,)
         let out: &mut [f32; 2] = &mut [0.0, 0.0]; // (2, )
-        matmul(out, &x, &w);
+        matmul(out, &x, w.flat());
         assert_eq!(out[0], 34.0);
         assert_eq!(out[1], 30.0);
     }
