@@ -50,12 +50,12 @@ fn rmsnorm2(x: &mut [f32], w: &[f32]) {
 fn matmul(xout: &mut [f32], x: &[f32], w: &[f32]) {
     // W (d,n) @ x (n,) -> xout (d,)
     let x_dim = x.len();
-    for i in 0..xout.len() {
-        xout[i] = 0.0;
+    xout.par_iter_mut().enumerate().for_each(|(i, xo)| {
+        *xo = 0.0;
         for j in 0..x.len() {
-            xout[i] += w[i * x_dim + j] * x[j];
+            *xo += w[i * x_dim + j] * x[j];
         }
-    }
+    });
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
