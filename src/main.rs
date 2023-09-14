@@ -32,9 +32,9 @@ fn main() -> Result<()> {
     let args = CommandArgs::parse();
 
     // configure rayon
-    let cpus = num_cpus::get();
+    let threads = num_cpus::get();
     rayon::ThreadPoolBuilder::new()
-        .num_threads(cpus)
+        .num_threads(threads)
         .build_global()
         .unwrap();
 
@@ -51,7 +51,7 @@ fn main() -> Result<()> {
         std::io::stdout().flush().unwrap();
     }
     println!();
-    println!("{} tokens/s, {} threads", output.average_tokens_per_seconds(), cpus);
+    println!("{} tokens/s, {} threads", output.average_tokens_per_seconds(), threads);
 
     Ok(())
 }
