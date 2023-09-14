@@ -723,36 +723,38 @@ impl<'a> Llama2Runner<'a> {
         }
     }
 
-    fn attention_head(&mut self, l: usize, h: usize, pos: usize) {
-        let head_size = self.head_size();
+    fn multi_head_attention(&mut self, l: usize, pos: usize) {
+        for h in 0..self.conf.n_heads {
+            let head_size = self.head_size();
 
-        // get the query vector for this head
-        let q = &self.state.q[h * head_size..h * head_size + head_size];
-        //  attention scores for this head
-        let att = &mut self.state.att[h];
-        // iterate over all timesteps, including the current one
-        for t in 0..(pos + 1) {
-            let k = &self.state.key_cache[l][t][h * head_size..h * head_size + head_size];
-            // calculate the attention score as the dot product of q and k
-            let mut score = (0..head_size).map(|i| q[i] * k[i]).sum::<f32>();
-            score /= (head_size as f32).sqrt();
-            // save the score to the attention buffer
-            att[t] = score;
-        }
+            // get the query vector for this head
+            let q = &self.state.q[h * head_size..h * head_size + head_size];
+            //  attention scores for this head
+            let att = &mut self.state.att[h];
+            // iterate over all timesteps, including the current one
+            for t in 0..(pos + 1) {
+                let k = &self.state.key_cache[l][t][h * head_size..h * head_size + head_size];
+                // calculate the attention score as the dot product of q and k
+                let mut score = (0..head_size).map(|i| q[i] * k[i]).sum::<f32>();
+                score /= (head_size as f32).sqrt();
+                // save the score to the attention buffer
+                att[t] = score;
+            }
 
-        // softmax the scores to get attention weights, from 0..pos inclusively
-        softmax(&mut att[0..pos + 1]);
+            // softmax the scores to get attention weights, from 0..pos inclusively
+            softmax(&mut att[0..pos + 1]);
 
-        // weighted sum of the values, store back into xb
-        let xb = &mut self.state.xb[h * head_size..h * head_size + head_size];
-        xb.fill(0.0);
-        for t in 0..pos + 1 {
-            let v = &self.state.value_cache[l][t][h * head_size..h * head_size + head_size];
-            // get the attention weight for this timestep
-            let a = att[t];
-            // accumulate the weighted value into xb
-            for i in 0..head_size {
-                xb[i] += a * v[i]
+            // weighted sum of the values, store back into xb
+            let xb = &mut self.state.xb[h * head_size..h * head_size + head_size];
+            xb.fill(0.0);
+            for t in 0..pos + 1 {
+                let v = &self.state.value_cache[l][t][h * head_size..h * head_size + head_size];
+                // get the attention weight for this timestep
+                let a = att[t];
+                // accumulate the weighted value into xb
+                for i in 0..head_size {
+                    xb[i] += a * v[i]
+                }
             }
         }
     }
@@ -833,9 +835,9 @@ impl<'a> Llama2Runner<'a> {
             self.kv_cache(l, pos);
 
             // multihead attention. iterate over all heads
-            for h in 0..self.conf.n_heads {
-                self.attention_head(l, h, pos);
-            }
+            self.multi_head_attention(l, pos);
+
+            // ffn
             self.ffn(l)?;
         }
 
