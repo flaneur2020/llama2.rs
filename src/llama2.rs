@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::mem;
 use std::ops::AddAssign;
-use std::ops::Index;
 use std::time::Duration;
 use std::time::Instant;
 use std::vec;
@@ -124,6 +123,14 @@ impl<'a> Tensor<'a> {
         &self.shape
     }
 
+    pub fn to_vec(self) -> Result<Vec<Tensor<'a>>> {
+        let mut result = Vec::with_capacity(self.shape[0]);
+        for i in 0..self.shape[0] {
+            result.push(self.at(i)?);
+        }
+        Ok(result)
+    }
+
     pub fn at(&self, idx: usize) -> Result<Self> {
         if idx >= self.shape[0] {
             return Err(Llama2Error {
@@ -161,17 +168,17 @@ pub struct Llama2Weights<'a> {
     // token embedding table
     token_embedding_table: Tensor<'a>, // (vocab_size, dim)
     // weights for rmsnorms
-    rms_att_weight: Tensor<'a>, // (layer, dim) rmsnorm weights
-    rms_ffn_weight: Tensor<'a>, // (layer, dim)
+    rms_att_weight: Vec<Tensor<'a>>, // (layer, dim) rmsnorm weights
+    rms_ffn_weight: Vec<Tensor<'a>>, // (layer, dim)
     // weights for matmuls
-    wq: Tensor<'a>, // (layer, dim, dim)
-    wk: Tensor<'a>, // (layer, dim, dim)
-    wv: Tensor<'a>, // (layer, dim, dim)
-    wo: Tensor<'a>, // (layer, dim, dim)
+    wq: Vec<Tensor<'a>>, // (layer, dim, dim)
+    wk: Vec<Tensor<'a>>, // (layer, dim, dim)
+    wv: Vec<Tensor<'a>>, // (layer, dim, dim)
+    wo: Vec<Tensor<'a>>, // (layer, dim, dim)
     // weights for ffn
-    w1: Tensor<'a>, // (layer, hidden_dim, dim)
-    w2: Tensor<'a>, // (layer, dim, hidden_dim)
-    w3: Tensor<'a>, // (layer, hidden_dim, dim)
+    w1: Vec<Tensor<'a>>, // (layer, hidden_dim, dim)
+    w2: Vec<Tensor<'a>>, // (layer, dim, hidden_dim)
+    w3: Vec<Tensor<'a>>, // (layer, hidden_dim, dim)
     // final rmsnorm
     rms_final_weight: Tensor<'a>, // (dim, )
     // (optional) classifier weights for the logits, on the last layer
@@ -285,15 +292,15 @@ impl Llama2CheckpointLoader {
         let mut weights = Llama2Weights::default();
         let head_size = conf.dim / conf.n_heads;
         weights.token_embedding_table = r.read_tensor(vec![conf.vocab_size, conf.dim])?;
-        weights.rms_att_weight = r.read_tensor(vec![conf.n_layers, conf.dim])?;
-        weights.wq = r.read_tensor(vec![conf.n_layers, conf.dim, conf.n_heads * head_size])?;
-        weights.wk = r.read_tensor(vec![conf.n_layers, conf.dim, conf.n_kv_heads * head_size])?;
-        weights.wv = r.read_tensor(vec![conf.n_layers, conf.dim, conf.n_kv_heads * head_size])?;
-        weights.wo = r.read_tensor(vec![conf.n_layers, conf.n_heads * head_size, conf.dim])?;
-        weights.rms_ffn_weight = r.read_tensor(vec![conf.n_layers, conf.dim])?;
-        weights.w1 = r.read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?;
-        weights.w2 = r.read_tensor(vec![conf.n_layers, conf.dim, conf.hidden_dim])?;
-        weights.w3 = r.read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?;
+        weights.rms_att_weight = r.read_tensor(vec![conf.n_layers, conf.dim])?.to_vec()?;
+        weights.wq = r.read_tensor(vec![conf.n_layers, conf.dim, conf.n_heads * head_size])?.to_vec()?;
+        weights.wk = r.read_tensor(vec![conf.n_layers, conf.dim, conf.n_kv_heads * head_size])?.to_vec()?;
+        weights.wv = r.read_tensor(vec![conf.n_layers, conf.dim, conf.n_kv_heads * head_size])?.to_vec()?;
+        weights.wo = r.read_tensor(vec![conf.n_layers, conf.n_heads * head_size, conf.dim])?.to_vec()?;
+        weights.rms_ffn_weight = r.read_tensor(vec![conf.n_layers, conf.dim])?.to_vec()?;
+        weights.w1 = r.read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?.to_vec()?;
+        weights.w2 = r.read_tensor(vec![conf.n_layers, conf.dim, conf.hidden_dim])?.to_vec()?;
+        weights.w3 = r.read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?.to_vec()?;
         weights.rms_final_weight = r.read_tensor(vec![conf.dim])?;
         let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_real (for RoPE)
         let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_imag (for RoPE)
@@ -754,7 +761,7 @@ impl<'a> Llama2Runner<'a> {
     fn ffn(&mut self, l: usize) -> Result<()> {
         let hidden_dim = self.conf.hidden_dim;
         // final matmul to get the output of the attention
-        matmul(&mut self.state.xb2, &self.state.xb, self.weights.wo.at(l)?.flat());
+        matmul(&mut self.state.xb2, &self.state.xb, self.weights.wo[l].flat());
 
         // residual connection back into x
         accum(&mut self.state.x, &self.state.xb2);
@@ -763,13 +770,13 @@ impl<'a> Llama2Runner<'a> {
         rmsnorm(
             &mut self.state.xb,
             &self.state.x,
-            self.weights.rms_ffn_weight.at(l)?.flat(),
+            self.weights.rms_ffn_weight[l].flat(),
         );
 
         // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
         // first calculate self.w1(x) and self.w3(x)
-        matmul(&mut self.state.hb, &self.state.xb, self.weights.w1.at(l)?.flat());
-        matmul(&mut self.state.hb2, &self.state.xb, self.weights.w3.at(l)?.flat());
+        matmul(&mut self.state.hb, &self.state.xb, self.weights.w1[l].flat());
+        matmul(&mut self.state.hb2, &self.state.xb, self.weights.w3[l].flat());
 
         // F.silu; silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
         for i in 0..hidden_dim {
@@ -782,7 +789,7 @@ impl<'a> Llama2Runner<'a> {
         }
 
         // final matmul to get the output of the ffn
-        matmul(&mut self.state.xb, &self.state.hb, &self.weights.w2.at(l)?.flat());
+        matmul(&mut self.state.xb, &self.state.hb, &self.weights.w2[l].flat());
 
         // residual connection
         accum(&mut self.state.x, &self.state.xb);
@@ -795,11 +802,11 @@ impl<'a> Llama2Runner<'a> {
         rmsnorm(
             &mut self.state.xb,
             &self.state.x,
-            self.weights.rms_att_weight.at(l)?.flat(),
+            self.weights.rms_att_weight[l].flat(),
         );
-        matmul(&mut self.state.q, &self.state.xb, self.weights.wq.at(l)?.flat());
-        matmul(&mut self.state.k, &self.state.xb, self.weights.wk.at(l)?.flat());
-        matmul(&mut self.state.v, &self.state.xb, self.weights.wv.at(l)?.flat());
+        matmul(&mut self.state.q, &self.state.xb, self.weights.wq[l].flat());
+        matmul(&mut self.state.k, &self.state.xb, self.weights.wk[l].flat());
+        matmul(&mut self.state.v, &self.state.xb, self.weights.wv[l].flat());
         Ok(())
     }
 
@@ -1013,15 +1020,15 @@ mod tests {
         assert_eq!(r.total_bytes(), 7 * 4);
         let weights = Llama2CheckpointLoader::load_weights(&mut r, &conf)?;
         assert_eq!(weights.token_embedding_table.shape(), &[32000, 288]);
-        assert_eq!(weights.rms_att_weight.shape(), &[6, 288]);
-        assert_eq!(weights.rms_ffn_weight.shape(), &[6, 288]);
-        assert_eq!(weights.wq.shape(), &[6, 288, 288]);
-        assert_eq!(weights.wk.shape(), &[6, 288, 288]);
-        assert_eq!(weights.wv.shape(), &[6, 288, 288]);
-        assert_eq!(weights.wo.shape(), &[6, 288, 288]);
-        assert_eq!(weights.w1.shape(), &[6, 768, 288]);
-        assert_eq!(weights.w2.shape(), &[6, 288, 768]);
-        assert_eq!(weights.w3.shape(), &[6, 768, 288]);
+        assert_eq!(weights.rms_att_weight[0].shape(), &[288]);
+        assert_eq!(weights.rms_ffn_weight[0].shape(), &[288]);
+        assert_eq!(weights.wq[0].shape(), &[288, 288]);
+        assert_eq!(weights.wk[0].shape(), &[288, 288]);
+        assert_eq!(weights.wv[0].shape(), &[288, 288]);
+        assert_eq!(weights.wo[0].shape(), &[288, 288]);
+        assert_eq!(weights.w1[0].shape(), &[768, 288]);
+        assert_eq!(weights.w2[0].shape(), &[288, 768]);
+        assert_eq!(weights.w3[0].shape(), &[768, 288]);
         assert_eq!(weights.rms_final_weight.shape(), &[288]);
         assert_eq!(weights.wcls.shape(), &[32000, 288]);
         assert_eq!(r.total_bytes(), 60816028);
