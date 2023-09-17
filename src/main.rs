@@ -1,6 +1,6 @@
 mod llama2;
 use clap::Parser;
-use llama2::{Llama2CheckpointLoader, Llama2Runner, Llama2Sampler, Llama2TokenizerLoader, Result};
+use llama2::{Llama2CheckpointLoader, Llama2Runner, Llama2Sampler, Llama2Loader, Result};
 use std::io::Write;
 
 #[derive(Parser, Debug)]

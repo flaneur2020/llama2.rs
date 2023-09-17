@@ -230,9 +230,24 @@ impl<'a> Llama2CheckpointReader<'a> {
     }
 }
 
+pub trait Llama2Loader {
+    fn load(&self) -> Result<(Llama2Config, Llama2Weights, Llama2Tokenizer)>;
+}
+
 pub struct Llama2CheckpointLoader {
-    mmap: Mmap,
+    checkpoint_mmap: Mmap,
     tokenizer_path: String,
+}
+
+impl Llama2Loader for Llama2CheckpointLoader {
+    fn load(&self) -> Result<(Llama2Config, Llama2Weights, Llama2Tokenizer)> {
+        let mut r = self.reader();
+        let conf = Self::load_config(&mut r)?;
+        let weights = Self::load_weights(&mut r, &conf)?;
+        let mut tokenizer_loader = Llama2TokenizerLoader::new(&self.tokenizer_path)?;
+        let tokenizer = tokenizer_loader.load(conf.vocab_size)?;
+        Ok((conf, weights, tokenizer))
+    }
 }
 
 impl Llama2CheckpointLoader {
@@ -252,26 +267,17 @@ impl Llama2CheckpointLoader {
         };
 
         // prepare the tokenizer loader
-        Ok(Self { mmap, tokenizer_path: tokenizer_path.to_string() })
+        Ok(Self { checkpoint_mmap: mmap, tokenizer_path: tokenizer_path.to_string() })
     }
 
-    pub fn load(&self) -> Result<(Llama2Config, Llama2Weights, Llama2Tokenizer)> {
-        let mut r = self.reader();
-        let conf = Self::load_config(&mut r)?;
-        let weights = Self::load_weights(&mut r, &conf)?;
-        let mut tokenizer_loader = Llama2TokenizerLoader::new(&self.tokenizer_path)?;
-        let tokenizer = tokenizer_loader.load(conf.vocab_size)?;
-        Ok((conf, weights, tokenizer))
-    }
-
-    pub(crate) fn reader(&self) -> Llama2CheckpointReader {
+    fn reader(&self) -> Llama2CheckpointReader {
         Llama2CheckpointReader {
-            buf: &self.mmap[..],
+            buf: &self.checkpoint_mmap[..],
             total_bytes: 0,
         }
     }
 
-    pub(crate) fn load_config(r: &mut Llama2CheckpointReader<'_>) -> Result<Llama2Config> {
+    fn load_config(r: &mut Llama2CheckpointReader<'_>) -> Result<Llama2Config> {
         let dim = r.read_i32()? as usize;
         let hidden_dim = r.read_i32()? as usize;
         let n_layers = r.read_i32()? as usize;
@@ -290,7 +296,7 @@ impl Llama2CheckpointLoader {
         })
     }
 
-    pub(crate) fn load_weights<'a>(
+    fn load_weights<'a>(
         r: &mut Llama2CheckpointReader<'a>,
         conf: &Llama2Config,
     ) -> Result<Llama2Weights<'a>> {
