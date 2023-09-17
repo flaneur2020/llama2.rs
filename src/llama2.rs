@@ -174,9 +174,6 @@ pub struct Llama2Weights<'a> {
     w3: Tensor<'a>, // (layer, hidden_dim, dim)
     // final rmsnorm
     rms_final_weight: Tensor<'a>, // (dim, )
-    // freq_cis for RoPE relatively positional embeddings
-    freq_cis_real: Tensor<'a>, // (seq_len, head_size/2)
-    freq_cis_imag: Tensor<'a>, // (seq_len, head_size/2)
     // (optional) classifier weights for the logits, on the last layer
     wcls: Tensor<'a>, // (vocab_size, dim)
 }
@@ -298,8 +295,8 @@ impl Llama2CheckpointLoader {
         weights.w2 = r.read_tensor(vec![conf.n_layers, conf.dim, conf.hidden_dim])?;
         weights.w3 = r.read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?;
         weights.rms_final_weight = r.read_tensor(vec![conf.dim])?;
-        weights.freq_cis_real = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_real (for RoPE)
-        weights.freq_cis_imag = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_imag (for RoPE)
+        let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_real (for RoPE)
+        let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_imag (for RoPE)
         weights.wcls = if shared_weights {
             weights.token_embedding_table.clone()
         } else {
@@ -1026,8 +1023,6 @@ mod tests {
         assert_eq!(weights.w2.shape(), &[6, 288, 768]);
         assert_eq!(weights.w3.shape(), &[6, 768, 288]);
         assert_eq!(weights.rms_final_weight.shape(), &[288]);
-        assert_eq!(weights.freq_cis_real.shape(), &[6144]);
-        assert_eq!(weights.freq_cis_imag.shape(), &[6144]);
         assert_eq!(weights.wcls.shape(), &[32000, 288]);
         assert_eq!(r.total_bytes(), 60816028);
         Ok(())
