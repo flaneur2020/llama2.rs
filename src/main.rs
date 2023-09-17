@@ -38,11 +38,9 @@ fn main() -> Result<()> {
         .build_global()
         .unwrap();
 
-    let checkpoint_loader = Llama2CheckpointLoader::new(&args.checkpoint)?;
-    let mut tokenizer_loader = Llama2TokenizerLoader::new(&args.tokenizer)?;
+    let mut checkpoint_loader = Llama2CheckpointLoader::new(&args.checkpoint, &args.tokenizer)?;
 
-    let (conf, weights) = checkpoint_loader.load()?;
-    let tokenizer = tokenizer_loader.load(conf.vocab_size)?;
+    let (conf, weights, tokenizer) = checkpoint_loader.load()?;
     let mut sampler = Llama2Sampler::new(conf.vocab_size, args.temperature, args.probability);
     let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
     let mut output = runner.generate(&args.prompt, args.steps, &mut sampler)?;

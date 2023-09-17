@@ -232,30 +232,36 @@ impl<'a> Llama2CheckpointReader<'a> {
 
 pub struct Llama2CheckpointLoader {
     mmap: Mmap,
+    tokenizer_path: String,
 }
 
 impl Llama2CheckpointLoader {
-    pub fn new(path: &str) -> Result<Self> {
-        let file = File::open(path).map_err(|e| Llama2Error {
+    pub fn new(bin_path: &str, tokenizer_path: &str) -> Result<Self> {
+        // prepare the mmaped checkpoint bin file
+        let file = File::open(bin_path).map_err(|e| Llama2Error {
             kind: Llama2ErrorKind::IOError,
-            message: format!("failed to open file {}: {}", path, e),
+            message: format!("failed to open file {}: {}", bin_path, e),
             source: Some(Box::new(e)),
         })?;
         let mmap = unsafe {
             MmapOptions::new().map(&file).map_err(|e| Llama2Error {
                 kind: Llama2ErrorKind::IOError,
-                message: format!("failed to mmap file {}: {}", path, e),
+                message: format!("failed to mmap file {}: {}", bin_path, e),
                 source: Some(Box::new(e)),
             })?
         };
-        Ok(Self { mmap })
+
+        // prepare the tokenizer loader
+        Ok(Self { mmap, tokenizer_path: tokenizer_path.to_string() })
     }
 
-    pub fn load(&self) -> Result<(Llama2Config, Llama2Weights)> {
+    pub fn load(&self) -> Result<(Llama2Config, Llama2Weights, Llama2Tokenizer)> {
         let mut r = self.reader();
         let conf = Self::load_config(&mut r)?;
         let weights = Self::load_weights(&mut r, &conf)?;
-        Ok((conf, weights))
+        let mut tokenizer_loader = Llama2TokenizerLoader::new(&self.tokenizer_path)?;
+        let tokenizer = tokenizer_loader.load(conf.vocab_size)?;
+        Ok((conf, weights, tokenizer))
     }
 
     pub(crate) fn reader(&self) -> Llama2CheckpointReader {
@@ -1007,7 +1013,7 @@ mod tests {
 
     #[test]
     fn test_checkpoint_loader() -> Result<()> {
-        let loader = Llama2CheckpointLoader::new("testdata/stories15M.bin")?;
+        let loader = Llama2CheckpointLoader::new("testdata/stories15M.bin", "testdata/tokenizer.bin")?;
         let mut r = loader.reader();
         let conf = Llama2CheckpointLoader::load_config(&mut r)?;
         assert_eq!(conf.dim, 288);
@@ -1087,11 +1093,9 @@ mod tests {
 
     #[test]
     fn test_generate() -> Result<()> {
-        let checkpoint_loader = Llama2CheckpointLoader::new("testdata/stories15M.bin")?;
-        let mut tokenizer_loader = Llama2TokenizerLoader::new("testdata/tokenizer.bin")?;
+        let checkpoint_loader = Llama2CheckpointLoader::new("testdata/stories15M.bin", "testdata/tokenizer.bin")?;
 
-        let (conf, weights) = checkpoint_loader.load()?;
-        let tokenizer = tokenizer_loader.load(conf.vocab_size)?;
+        let (conf, weights, tokenizer) = checkpoint_loader.load()?;
         let mut sampler = Llama2Sampler::new(conf.vocab_size, 0.0, 0.0);
         let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
         let output = runner.generate("hello, world", 15, &mut sampler)?;
