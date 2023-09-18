@@ -174,8 +174,8 @@ pub struct Llama2Weights<'a> {
     rms_ffn_weight: Vec<Tensor<'a>>, // (layer, dim)
     // weights for matmuls
     wq: Vec<Tensor<'a>>, // (layer, n_head * head_size, dim)
-    wk: Vec<Tensor<'a>>, // (layer, n_head * head_size, dim)
-    wv: Vec<Tensor<'a>>, // (layer, n_head * head_size, dim)
+    wk: Vec<Tensor<'a>>, // (layer, n_head * head_size, kv_dim)
+    wv: Vec<Tensor<'a>>, // (layer, n_head * head_size, kv_dim)
     wo: Vec<Tensor<'a>>, // (layer, n_head * head_size, dim)
     // weights for ffn
     w1: Vec<Tensor<'a>>, // (layer, hidden_dim, dim)
@@ -996,6 +996,9 @@ impl<'a> Llama2Runner<'a> {
             );
 
             // matmul qkv for every head
+            // .q(embedding_dim, ) = xb(embedding_dim, ) * wq(embedding_dim, embedding_dim)
+            // .k(kv_dim, ) = xb(embedding_dim, ) * wq(embedding_dim, kv_dim)
+            // .v(kv_dim, ) = xb(embedding_dim, ) * wv(embedding_dim, kv_dim)
             matmul(&mut self.state.q, &self.state.xb, self.weights.wq[l].flat());
             matmul(&mut self.state.k, &self.state.xb, self.weights.wk[l].flat());
             matmul(&mut self.state.v, &self.state.xb, self.weights.wv[l].flat());
@@ -1004,6 +1007,7 @@ impl<'a> Llama2Runner<'a> {
             self.rope(pos);
 
             // save key,value at this time step (pos) to our kv cache
+            // save .k, .v to kv_cache[l][pos]
             self.kv_cache(l, pos);
 
             // multihead attention. iterate over all heads
