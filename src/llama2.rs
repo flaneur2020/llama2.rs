@@ -262,8 +262,19 @@ impl Llama2GgufLoader {
         let vocab_scores = gf
             .metadata()
             .get_f32_array("tokenizer.ggml.scores")
-            .unwrap();
-        todo!()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let eos_token = gf
+            .metadata()
+            .get_u32("tokenizer.ggml.eos_token_id")
+            .unwrap() as usize;
+        let bos_token = gf
+            .metadata()
+            .get_u32("tokenizer.ggml.bos_token_id")
+            .unwrap() as usize;
+        Llama2Tokenizer::new(vocab, vocab_scores, 27, bos_token, eos_token)
     }
 
     fn load_config(gf: &GGUFFile) -> Llama2Config {
@@ -427,6 +438,35 @@ pub struct Llama2Tokenizer {
 }
 
 impl Llama2Tokenizer {
+    pub fn new(
+        vocab: Vec<String>,
+        vocab_scores: Vec<f32>,
+        token_buf_len: usize,
+        bos_token: usize,
+        eos_token: usize,
+    ) -> Self {
+        let vocab_index = vocab
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (v.clone(), i))
+            .collect();
+
+        let mut byte_pieces = [0u8; 256];
+        for (i, p) in byte_pieces.iter_mut().enumerate() {
+            *p = i as u8
+        }
+
+        Self {
+            vocab,
+            vocab_index,
+            vocab_scores,
+            token_buf_len,
+            byte_pieces,
+            bos_token,
+            eos_token,
+        }
+    }
+
     pub fn decode(&self, prev_token: usize, token: usize) -> Result<String> {
         let mut piece: &[u8] = self.vocab[token].as_bytes();
         // following BOS (1) token, sentencepiece decoder strips any leading whitespace (see PR #89)
@@ -549,39 +589,26 @@ impl Llama2TokenizerLoader {
     }
 
     pub fn load(&mut self, vocab_size: usize) -> Result<Llama2Tokenizer> {
-        let mut vocabs = vec![String::new(); vocab_size];
+        let mut vocab = vec![String::new(); vocab_size];
         let mut vocab_scores = vec![0.0; vocab_size];
-        let mut byte_pieces = [0u8; 256];
 
-        for (i, p) in byte_pieces.iter_mut().enumerate() {
-            *p = i as u8
-        }
-
-        let max_token_length = self.read_i32()? as usize;
+        let token_buf_len = self.read_i32()? as usize;
         for i in 0..vocab_size {
             vocab_scores[i] = self.read_f32()?;
             let len = self.read_i32()?;
-            vocabs[i] = self.read_string(len as usize)?;
+            vocab[i] = self.read_string(len as usize)?;
         }
 
-        let vocab_index = vocabs
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (v.clone(), i))
-            .collect();
-        
         let bos_token = 1;
         let eos_token = 2;
 
-        Ok(Llama2Tokenizer {
-            vocab: vocabs,
+        Ok(Llama2Tokenizer::new(
+            vocab,
             vocab_scores,
-            vocab_index,
-            token_buf_len: max_token_length,
-            byte_pieces,
+            token_buf_len,
             bos_token,
             eos_token,
-        })
+        ))
     }
 
     fn read_i32(&mut self) -> Result<i32> {
