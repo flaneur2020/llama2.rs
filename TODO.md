@@ -1,2 +1,3 @@
-- [ ] parallel multihead
+- [x] parallel multihead
+- [ ] llama2 gguf loader
 - [ ] execute llama6b

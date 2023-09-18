@@ -1,3 +1,5 @@
+use ggml_rs::gguf::GGUFFile;
+use ggml_rs::gguf::GGUFFileLoader;
 use memmap::Mmap;
 use memmap::MmapOptions;
 use rand::Rng;
@@ -232,6 +234,35 @@ impl<'a> Llama2CheckpointReader<'a> {
 
 pub trait Llama2Loader {
     fn load(&self) -> Result<(Llama2Config, Llama2Weights, Llama2Tokenizer)>;
+}
+
+pub struct Llama2GgufLoader {
+    inner: GGUFFileLoader,
+}
+
+impl Llama2GgufLoader {
+    pub fn new(path: &str) -> Result<Self> {
+        let inner = GGUFFileLoader::new(path).map_err(|err| Llama2Error {
+            kind: Llama2ErrorKind::IOError,
+            message: format!("failed to open file {}: {}", path, err),
+            source: Some(Box::new(err)),
+        })?;
+
+        Ok(Self { inner })
+    }
+
+    fn load_config(gf: &GGUFFile) -> Llama2Config {
+        let head_count = gf.header().get_metadata("llama.attention.head_count");
+        todo!()
+    }
+}
+
+impl Llama2Loader for Llama2GgufLoader {
+    fn load(&self) -> Result<(Llama2Config, Llama2Weights, Llama2Tokenizer)> {
+        let gf = self.inner.load();
+
+        todo!();
+    }
 }
 
 pub struct Llama2CheckpointLoader {
