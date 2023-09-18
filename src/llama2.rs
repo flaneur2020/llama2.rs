@@ -1,5 +1,5 @@
-use ggml_rs::gguf::GGUFFile;
-use ggml_rs::gguf::GGUFFileLoader;
+use crabml::gguf::GGUFFile;
+use crabml::gguf::GGUFFileLoader;
 use memmap::Mmap;
 use memmap::MmapOptions;
 use rand::Rng;
@@ -252,8 +252,23 @@ impl Llama2GgufLoader {
     }
 
     fn load_config(gf: &GGUFFile) -> Llama2Config {
-        let head_count = gf.header().get_metadata("llama.attention.head_count");
-        todo!()
+        // let rope_dims = gf.metadata().get_u32("llama.rope.dimension_count").unwrap();
+        let n_heads = gf.metadata().get_u32("llama.attention.head_count").unwrap() as usize;
+        let n_layers = gf.metadata().get_u32("llama.block_count").unwrap() as usize;
+        let hidden_dim = gf.metadata().get_u32("llama.feed_forward_length").unwrap() as usize;
+        let n_kv_heads = gf.metadata().get_u32("llama.attention.head_count_kv").unwrap() as usize;
+        let seq_len = gf.metadata().get_u32("llama.attention.context_length").unwrap() as usize;
+        let vocab_size = gf.metadata().get_string_array("tokenizer.ggml.tokens").unwrap().len();
+        let dim = gf.metadata().get_u32("llama.attention.embedding_length").unwrap() as usize;
+        Llama2Config {
+            n_heads,
+            n_kv_heads,
+            n_layers,
+            dim,
+            hidden_dim,
+            seq_len,
+            vocab_size,
+        }
     }
 }
 
