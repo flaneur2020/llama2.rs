@@ -39,7 +39,7 @@ fn rmsnorm(o: &mut [f32], x: &[f32], w: &[f32]) {
     }
 }
 
-fn rmsnorm2(x: &mut [f32], w: &[f32]) {
+fn rmsnorm_inplace(x: &mut [f32], w: &[f32]) {
     let ss = x.iter().fold(0.0, |s, n| s + n * n);
     let rms = ((ss / x.len() as f32) + 1e-5).sqrt();
     // normalize and scale
@@ -156,7 +156,7 @@ impl<'a> Tensor<'a> {
 
 #[derive(Debug, Copy, Clone)]
 pub struct Llama2Config {
-    pub dim: usize,
+    pub embedding_dim: usize, // the dim of embedding
     pub hidden_dim: usize,
     pub n_layers: usize,
     pub n_heads: usize,
@@ -173,10 +173,10 @@ pub struct Llama2Weights<'a> {
     rms_att_weight: Vec<Tensor<'a>>, // (layer, dim) rmsnorm weights
     rms_ffn_weight: Vec<Tensor<'a>>, // (layer, dim)
     // weights for matmuls
-    wq: Vec<Tensor<'a>>, // (layer, dim, dim)
-    wk: Vec<Tensor<'a>>, // (layer, dim, dim)
-    wv: Vec<Tensor<'a>>, // (layer, dim, dim)
-    wo: Vec<Tensor<'a>>, // (layer, dim, dim)
+    wq: Vec<Tensor<'a>>, // (layer, n_head * head_size, dim)
+    wk: Vec<Tensor<'a>>, // (layer, n_head * head_size, dim)
+    wv: Vec<Tensor<'a>>, // (layer, n_head * head_size, dim)
+    wo: Vec<Tensor<'a>>, // (layer, n_head * head_size, dim)
     // weights for ffn
     w1: Vec<Tensor<'a>>, // (layer, hidden_dim, dim)
     w2: Vec<Tensor<'a>>, // (layer, dim, hidden_dim)
@@ -298,12 +298,13 @@ impl Llama2GgufLoader {
         let dim = gf
             .metadata()
             .get_u32("llama.attention.embedding_length")
-            .unwrap() as usize;
+            .unwrap() as usize
+            * n_heads;
         Llama2Config {
             n_heads,
             n_kv_heads,
             n_layers,
-            dim,
+            embedding_dim: dim,
             hidden_dim,
             seq_len,
             vocab_size,
@@ -374,7 +375,7 @@ impl Llama2CheckpointLoader {
         let vocab_size = r.read_i32()? as usize;
         let seq_len = r.read_i32()? as usize;
         Ok(Llama2Config {
-            dim,
+            embedding_dim: dim,
             hidden_dim,
             n_layers,
             n_heads,
@@ -390,38 +391,58 @@ impl Llama2CheckpointLoader {
     ) -> Result<Llama2Weights<'a>> {
         let shared_weights = conf.vocab_size > 0;
         let mut weights = Llama2Weights::default();
-        let head_size = conf.dim / conf.n_heads;
-        weights.token_embedding_table = r.read_tensor(vec![conf.vocab_size, conf.dim])?;
-        weights.rms_att_weight = r.read_tensor(vec![conf.n_layers, conf.dim])?.to_vec()?;
+        let head_size = conf.embedding_dim / conf.n_heads;
+        weights.token_embedding_table = r.read_tensor(vec![conf.vocab_size, conf.embedding_dim])?;
+        weights.rms_att_weight = r
+            .read_tensor(vec![conf.n_layers, conf.embedding_dim])?
+            .to_vec()?;
         weights.wq = r
-            .read_tensor(vec![conf.n_layers, conf.dim, conf.n_heads * head_size])?
+            .read_tensor(vec![
+                conf.n_layers,
+                conf.embedding_dim,
+                conf.n_heads * head_size,
+            ])?
             .to_vec()?;
         weights.wk = r
-            .read_tensor(vec![conf.n_layers, conf.dim, conf.n_kv_heads * head_size])?
+            .read_tensor(vec![
+                conf.n_layers,
+                conf.embedding_dim,
+                conf.n_kv_heads * head_size,
+            ])?
             .to_vec()?;
         weights.wv = r
-            .read_tensor(vec![conf.n_layers, conf.dim, conf.n_kv_heads * head_size])?
+            .read_tensor(vec![
+                conf.n_layers,
+                conf.embedding_dim,
+                conf.n_kv_heads * head_size,
+            ])?
             .to_vec()?;
         weights.wo = r
-            .read_tensor(vec![conf.n_layers, conf.n_heads * head_size, conf.dim])?
+            .read_tensor(vec![
+                conf.n_layers,
+                conf.n_heads * head_size,
+                conf.embedding_dim,
+            ])?
             .to_vec()?;
-        weights.rms_ffn_weight = r.read_tensor(vec![conf.n_layers, conf.dim])?.to_vec()?;
+        weights.rms_ffn_weight = r
+            .read_tensor(vec![conf.n_layers, conf.embedding_dim])?
+            .to_vec()?;
         weights.w1 = r
-            .read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?
+            .read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.embedding_dim])?
             .to_vec()?;
         weights.w2 = r
-            .read_tensor(vec![conf.n_layers, conf.dim, conf.hidden_dim])?
+            .read_tensor(vec![conf.n_layers, conf.embedding_dim, conf.hidden_dim])?
             .to_vec()?;
         weights.w3 = r
-            .read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?
+            .read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.embedding_dim])?
             .to_vec()?;
-        weights.rms_final_weight = r.read_tensor(vec![conf.dim])?;
+        weights.rms_final_weight = r.read_tensor(vec![conf.embedding_dim])?;
         let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_real (for RoPE)
         let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_imag (for RoPE)
         weights.wcls = if shared_weights {
             weights.token_embedding_table.clone()
         } else {
-            r.read_tensor(vec![conf.vocab_size, conf.dim])?
+            r.read_tensor(vec![conf.vocab_size, conf.embedding_dim])?
         };
         Ok(weights)
     }
@@ -764,14 +785,14 @@ impl Llama2Sampler {
 }
 
 struct Llama2State {
-    x: Vec<f32>,         // activation at current time stamp (dim,)
-    xb: Vec<f32>,        // same, but inside a residual branch (dim,)
+    x: Vec<f32>,         // activation at current time stamp (embedding_dim,)
+    xb: Vec<f32>,        // same, but inside a residual branch (embedding_dim,)
     xb2: Vec<f32>,       // an additional buffer just for convenience (dim,)
     hb: Vec<f32>,        // buffer for hidden dimension in the ffn (hidden_dim,)
     hb2: Vec<f32>,       // buffer for hidden dimension in the ffn (hidden_dim,)
     q: Vec<f32>,         // query (dim, )
-    k: Vec<f32>,         // key (dim, )
-    v: Vec<f32>,         // value (dim, )
+    k: Vec<f32>,         // key (kv_dim, )
+    v: Vec<f32>,         // value (kv_dim, )
     attn: Vec<Vec<f32>>, // buffer for scores/attention values (n_heads, seq_len)
     logits: Vec<f32>,    // output logits (vocab_size, )
     // ProbIndex *probindex; // buffer used in top-p sampling
@@ -793,21 +814,31 @@ impl<'a> Llama2Runner<'a> {
         tokenizer: Llama2Tokenizer,
     ) -> Self {
         let state = Llama2State {
-            x: vec![0.0; conf.dim],
-            xb: vec![0.0; conf.dim],
-            xb2: vec![0.0; conf.dim],
+            x: vec![0.0; conf.embedding_dim],
+            xb: vec![0.0; conf.embedding_dim],
+            xb2: vec![0.0; conf.embedding_dim],
             hb: vec![0.0; conf.hidden_dim],
             hb2: vec![0.0; conf.hidden_dim],
-            q: vec![0.0; conf.dim],
-            k: vec![0.0; conf.dim],
-            v: vec![0.0; conf.dim],
-            attn: (0..conf.n_heads).map(|_| vec![0.0; conf.dim]).collect(),
+            q: vec![0.0; conf.embedding_dim],
+            k: vec![0.0; conf.embedding_dim],
+            v: vec![0.0; conf.embedding_dim],
+            attn: (0..conf.n_heads)
+                .map(|_| vec![0.0; conf.embedding_dim])
+                .collect(),
             logits: vec![0.0; conf.vocab_size],
             key_cache: (0..conf.n_layers)
-                .map(|_| (0..conf.seq_len).map(|_| vec![0.0; conf.dim]).collect())
+                .map(|_| {
+                    (0..conf.seq_len)
+                        .map(|_| vec![0.0; conf.embedding_dim])
+                        .collect()
+                })
                 .collect(),
             value_cache: (0..conf.n_layers)
-                .map(|_| (0..conf.seq_len).map(|_| vec![0.0; conf.dim]).collect())
+                .map(|_| {
+                    (0..conf.seq_len)
+                        .map(|_| vec![0.0; conf.embedding_dim])
+                        .collect()
+                })
                 .collect(),
         };
 
@@ -829,15 +860,15 @@ impl<'a> Llama2Runner<'a> {
     }
 
     fn head_size(&self) -> usize {
-        self.conf.dim / self.conf.n_heads
+        self.conf.embedding_dim / self.conf.n_heads
     }
 
     fn kv_dim(&self) -> usize {
-        (self.conf.dim * self.conf.n_kv_heads) / self.conf.n_heads
+        (self.conf.embedding_dim * self.conf.n_kv_heads) / self.conf.n_heads
     }
 
     fn rope(&mut self, pos: usize) {
-        for i in (0..self.conf.dim).step_by(2) {
+        for i in (0..self.conf.embedding_dim).step_by(2) {
             let head_dim = i % self.head_size();
             let freq = 1.0 / 10000_f32.powf(head_dim as f32 / self.head_size() as f32);
             let val = pos as f32 * freq;
@@ -895,17 +926,10 @@ impl<'a> Llama2Runner<'a> {
             });
     }
 
+    // input: self.state.xb
+    // output: self.state.xb
     fn ffn(&mut self, l: usize) -> Result<()> {
         let hidden_dim = self.conf.hidden_dim;
-        // final matmul to get the output of the attention
-        matmul(
-            &mut self.state.xb2,
-            &self.state.xb,
-            self.weights.wo[l].flat(),
-        );
-
-        // residual connection back into x
-        accum(&mut self.state.x, &self.state.xb2);
 
         // ffn rmsnorm
         rmsnorm(
@@ -950,25 +974,11 @@ impl<'a> Llama2Runner<'a> {
         Ok(())
     }
 
-    fn matmul_qkv(&mut self, l: usize) -> Result<()> {
-        // attention rmsnorm
-        rmsnorm(
-            &mut self.state.xb,
-            &self.state.x,
-            self.weights.rms_att_weight[l].flat(),
-        );
-        matmul(&mut self.state.q, &self.state.xb, self.weights.wq[l].flat());
-        matmul(&mut self.state.k, &self.state.xb, self.weights.wk[l].flat());
-        matmul(&mut self.state.v, &self.state.xb, self.weights.wv[l].flat());
-        Ok(())
-    }
-
     fn kv_cache(&mut self, l: usize, pos: usize) {
-        let kv_dim = self.kv_dim();
         let key_cache_row = &mut self.state.key_cache[l][pos];
         let value_cache_row = &mut self.state.value_cache[l][pos];
-        key_cache_row.copy_from_slice(&self.state.k[0..kv_dim]);
-        value_cache_row.copy_from_slice(&self.state.v[0..kv_dim]);
+        key_cache_row.copy_from_slice(&self.state.k);
+        value_cache_row.copy_from_slice(&self.state.v);
     }
 
     pub fn forward(&mut self, token: usize, pos: usize) -> Result<&mut [f32]> {
@@ -978,7 +988,17 @@ impl<'a> Llama2Runner<'a> {
 
         // forward all the layers
         for l in 0..self.conf.n_layers {
-            self.matmul_qkv(l)?;
+            // attention rnsnorm
+            rmsnorm(
+                &mut self.state.xb,
+                &self.state.x,
+                self.weights.rms_att_weight[l].flat(),
+            );
+
+            // matmul qkv for every head
+            matmul(&mut self.state.q, &self.state.xb, self.weights.wq[l].flat());
+            matmul(&mut self.state.k, &self.state.xb, self.weights.wk[l].flat());
+            matmul(&mut self.state.v, &self.state.xb, self.weights.wv[l].flat());
 
             // RoPE relative positional encoding: complex-valued rotate q and k by freq_cis in each head
             self.rope(pos);
@@ -987,14 +1007,25 @@ impl<'a> Llama2Runner<'a> {
             self.kv_cache(l, pos);
 
             // multihead attention. iterate over all heads
+            // output to self.state.xb
             self.multi_head_attention(l, pos);
+
+            // final matmul to get the output of the attention
+            matmul(
+                &mut self.state.xb2,
+                &self.state.xb,
+                self.weights.wo[l].flat(),
+            );
+
+            // residual connection back into x
+            accum(&mut self.state.x, &self.state.xb2);
 
             // ffn
             self.ffn(l)?;
         }
 
         // final rmsnorm
-        rmsnorm2(&mut self.state.x, self.weights.rms_final_weight.flat());
+        rmsnorm_inplace(&mut self.state.x, self.weights.rms_final_weight.flat());
 
         // classifier into logits
         matmul(
@@ -1168,7 +1199,7 @@ mod tests {
             Llama2CheckpointLoader::new("testdata/stories15M.bin", "testdata/tokenizer.bin")?;
         let mut r = loader.reader();
         let conf = Llama2CheckpointLoader::load_config(&mut r)?;
-        assert_eq!(conf.dim, 288);
+        assert_eq!(conf.embedding_dim, 288);
         assert_eq!(conf.hidden_dim, 768);
         assert_eq!(conf.n_heads, 6);
         assert_eq!(conf.n_kv_heads, 6);

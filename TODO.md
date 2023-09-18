@@ -1,3 +1,4 @@
 - [x] parallel multihead
+- [ ] refactor to seperate each head
 - [ ] llama2 gguf loader
 - [ ] execute llama6b
