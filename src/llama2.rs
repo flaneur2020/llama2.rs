@@ -251,15 +251,43 @@ impl Llama2GgufLoader {
         Ok(Self { inner })
     }
 
+    fn load_tokenizer(gf: &GGUFFile) -> Llama2Tokenizer {
+        let vocab = gf
+            .metadata()
+            .get_string_array("tokenizer.ggml.tokens")
+            .unwrap()
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        let vocab_scores = gf
+            .metadata()
+            .get_f32_array("tokenizer.ggml.scores")
+            .unwrap();
+        todo!()
+    }
+
     fn load_config(gf: &GGUFFile) -> Llama2Config {
         // let rope_dims = gf.metadata().get_u32("llama.rope.dimension_count").unwrap();
         let n_heads = gf.metadata().get_u32("llama.attention.head_count").unwrap() as usize;
         let n_layers = gf.metadata().get_u32("llama.block_count").unwrap() as usize;
         let hidden_dim = gf.metadata().get_u32("llama.feed_forward_length").unwrap() as usize;
-        let n_kv_heads = gf.metadata().get_u32("llama.attention.head_count_kv").unwrap() as usize;
-        let seq_len = gf.metadata().get_u32("llama.attention.context_length").unwrap() as usize;
-        let vocab_size = gf.metadata().get_string_array("tokenizer.ggml.tokens").unwrap().len();
-        let dim = gf.metadata().get_u32("llama.attention.embedding_length").unwrap() as usize;
+        let n_kv_heads = gf
+            .metadata()
+            .get_u32("llama.attention.head_count_kv")
+            .unwrap() as usize;
+        let seq_len = gf
+            .metadata()
+            .get_u32("llama.attention.context_length")
+            .unwrap() as usize;
+        let vocab_size = gf
+            .metadata()
+            .get_string_array("tokenizer.ggml.tokens")
+            .unwrap()
+            .len();
+        let dim = gf
+            .metadata()
+            .get_u32("llama.attention.embedding_length")
+            .unwrap() as usize;
         Llama2Config {
             n_heads,
             n_kv_heads,
@@ -313,7 +341,10 @@ impl Llama2CheckpointLoader {
         };
 
         // prepare the tokenizer loader
-        Ok(Self { checkpoint_mmap: mmap, tokenizer_path: tokenizer_path.to_string() })
+        Ok(Self {
+            checkpoint_mmap: mmap,
+            tokenizer_path: tokenizer_path.to_string(),
+        })
     }
 
     fn reader(&self) -> Llama2CheckpointReader {
@@ -351,14 +382,28 @@ impl Llama2CheckpointLoader {
         let head_size = conf.dim / conf.n_heads;
         weights.token_embedding_table = r.read_tensor(vec![conf.vocab_size, conf.dim])?;
         weights.rms_att_weight = r.read_tensor(vec![conf.n_layers, conf.dim])?.to_vec()?;
-        weights.wq = r.read_tensor(vec![conf.n_layers, conf.dim, conf.n_heads * head_size])?.to_vec()?;
-        weights.wk = r.read_tensor(vec![conf.n_layers, conf.dim, conf.n_kv_heads * head_size])?.to_vec()?;
-        weights.wv = r.read_tensor(vec![conf.n_layers, conf.dim, conf.n_kv_heads * head_size])?.to_vec()?;
-        weights.wo = r.read_tensor(vec![conf.n_layers, conf.n_heads * head_size, conf.dim])?.to_vec()?;
+        weights.wq = r
+            .read_tensor(vec![conf.n_layers, conf.dim, conf.n_heads * head_size])?
+            .to_vec()?;
+        weights.wk = r
+            .read_tensor(vec![conf.n_layers, conf.dim, conf.n_kv_heads * head_size])?
+            .to_vec()?;
+        weights.wv = r
+            .read_tensor(vec![conf.n_layers, conf.dim, conf.n_kv_heads * head_size])?
+            .to_vec()?;
+        weights.wo = r
+            .read_tensor(vec![conf.n_layers, conf.n_heads * head_size, conf.dim])?
+            .to_vec()?;
         weights.rms_ffn_weight = r.read_tensor(vec![conf.n_layers, conf.dim])?.to_vec()?;
-        weights.w1 = r.read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?.to_vec()?;
-        weights.w2 = r.read_tensor(vec![conf.n_layers, conf.dim, conf.hidden_dim])?.to_vec()?;
-        weights.w3 = r.read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?.to_vec()?;
+        weights.w1 = r
+            .read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?
+            .to_vec()?;
+        weights.w2 = r
+            .read_tensor(vec![conf.n_layers, conf.dim, conf.hidden_dim])?
+            .to_vec()?;
+        weights.w3 = r
+            .read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.dim])?
+            .to_vec()?;
         weights.rms_final_weight = r.read_tensor(vec![conf.dim])?;
         let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_real (for RoPE)
         let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_imag (for RoPE)
@@ -374,9 +419,11 @@ impl Llama2CheckpointLoader {
 pub struct Llama2Tokenizer {
     vocab: Vec<String>,
     vocab_scores: Vec<f32>,
-    max_token_length: usize,
+    token_buf_len: usize,
     byte_pieces: [u8; 256],
     vocab_index: HashMap<String, usize>,
+    bos_token: usize,
+    eos_token: usize,
 }
 
 impl Llama2Tokenizer {
@@ -415,11 +462,11 @@ impl Llama2Tokenizer {
     pub fn encode(&self, text: &str, bos: bool, eos: bool) -> Result<Vec<usize>> {
         // create a temporary buffer that will store merge candidates of always two consecutive tokens
         // *2 for concat, +1 for null terminator +2 for UTF8 (in case max_token_length is 1)
-        let mut str_buf = String::with_capacity(self.max_token_length * 2 + 1 + 2);
+        let mut token_buf = String::with_capacity(self.token_buf_len * 2 + 1 + 2);
         let mut tokens: Vec<usize> = vec![];
 
         if bos {
-            tokens.push(1);
+            tokens.push(self.bos_token);
         }
 
         // add_dummy_prefix is true by default
@@ -433,16 +480,16 @@ impl Llama2Tokenizer {
 
         let chars = text.chars();
         for ch in chars {
-            str_buf.clear();
-            str_buf.push(ch);
-            if let Some(tok) = self.vocab_index.get(&str_buf) {
+            token_buf.clear();
+            token_buf.push(ch);
+            if let Some(tok) = self.vocab_index.get(&token_buf) {
                 // we found this codepoint in vocab, add it as a token
                 tokens.push(*tok);
             } else {
                 // byte_fallback encoding: just encode each byte as a token
                 // +3 is here because the first 3 vocab elements are <unk>, <s>, </s>
                 // so the individual bytes only start at index 3
-                for byte in str_buf.bytes() {
+                for byte in token_buf.bytes() {
                     tokens.push(byte as usize + 3);
                 }
             }
@@ -456,10 +503,10 @@ impl Llama2Tokenizer {
             let mut i = 0;
 
             while i < (tokens.len() - 1) {
-                str_buf.clear();
-                str_buf.push_str(&self.vocab[tokens[i]]);
-                str_buf.push_str(&self.vocab[tokens[i + 1]]);
-                if let Some(tok) = self.vocab_index.get(&str_buf) {
+                token_buf.clear();
+                token_buf.push_str(&self.vocab[tokens[i]]);
+                token_buf.push_str(&self.vocab[tokens[i + 1]]);
+                if let Some(tok) = self.vocab_index.get(&token_buf) {
                     let new_score = self.vocab_scores[*tok];
                     if new_score > best_score {
                         best_score = new_score;
@@ -479,7 +526,7 @@ impl Llama2Tokenizer {
         }
 
         if eos {
-            tokens.push(2);
+            tokens.push(self.eos_token);
         }
 
         Ok(tokens)
@@ -522,13 +569,18 @@ impl Llama2TokenizerLoader {
             .enumerate()
             .map(|(i, v)| (v.clone(), i))
             .collect();
+        
+        let bos_token = 1;
+        let eos_token = 2;
 
         Ok(Llama2Tokenizer {
             vocab: vocabs,
             vocab_scores,
             vocab_index,
-            max_token_length,
+            token_buf_len: max_token_length,
             byte_pieces,
+            bos_token,
+            eos_token,
         })
     }
 
@@ -685,16 +737,16 @@ impl Llama2Sampler {
 }
 
 struct Llama2State {
-    x: Vec<f32>,        // activation at current time stamp (dim,)
-    xb: Vec<f32>,       // same, but inside a residual branch (dim,)
-    xb2: Vec<f32>,      // an additional buffer just for convenience (dim,)
-    hb: Vec<f32>,       // buffer for hidden dimension in the ffn (hidden_dim,)
-    hb2: Vec<f32>,      // buffer for hidden dimension in the ffn (hidden_dim,)
-    q: Vec<f32>,        // query (dim, )
-    k: Vec<f32>,        // key (dim, )
-    v: Vec<f32>,        // value (dim, )
+    x: Vec<f32>,         // activation at current time stamp (dim,)
+    xb: Vec<f32>,        // same, but inside a residual branch (dim,)
+    xb2: Vec<f32>,       // an additional buffer just for convenience (dim,)
+    hb: Vec<f32>,        // buffer for hidden dimension in the ffn (hidden_dim,)
+    hb2: Vec<f32>,       // buffer for hidden dimension in the ffn (hidden_dim,)
+    q: Vec<f32>,         // query (dim, )
+    k: Vec<f32>,         // key (dim, )
+    v: Vec<f32>,         // value (dim, )
     attn: Vec<Vec<f32>>, // buffer for scores/attention values (n_heads, seq_len)
-    logits: Vec<f32>,   // output logits (vocab_size, )
+    logits: Vec<f32>,    // output logits (vocab_size, )
     // ProbIndex *probindex; // buffer used in top-p sampling
     key_cache: Vec<Vec<Vec<f32>>>,   // (layer, seq_len, dim)
     value_cache: Vec<Vec<Vec<f32>>>, // (layer, seq_len, dim)
@@ -819,7 +871,11 @@ impl<'a> Llama2Runner<'a> {
     fn ffn(&mut self, l: usize) -> Result<()> {
         let hidden_dim = self.conf.hidden_dim;
         // final matmul to get the output of the attention
-        matmul(&mut self.state.xb2, &self.state.xb, self.weights.wo[l].flat());
+        matmul(
+            &mut self.state.xb2,
+            &self.state.xb,
+            self.weights.wo[l].flat(),
+        );
 
         // residual connection back into x
         accum(&mut self.state.x, &self.state.xb2);
@@ -833,8 +889,16 @@ impl<'a> Llama2Runner<'a> {
 
         // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
         // first calculate self.w1(x) and self.w3(x)
-        matmul(&mut self.state.hb, &self.state.xb, self.weights.w1[l].flat());
-        matmul(&mut self.state.hb2, &self.state.xb, self.weights.w3[l].flat());
+        matmul(
+            &mut self.state.hb,
+            &self.state.xb,
+            self.weights.w1[l].flat(),
+        );
+        matmul(
+            &mut self.state.hb2,
+            &self.state.xb,
+            self.weights.w3[l].flat(),
+        );
 
         // F.silu; silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
         for i in 0..hidden_dim {
@@ -847,7 +911,11 @@ impl<'a> Llama2Runner<'a> {
         }
 
         // final matmul to get the output of the ffn
-        matmul(&mut self.state.xb, &self.state.hb, &self.weights.w2[l].flat());
+        matmul(
+            &mut self.state.xb,
+            &self.state.hb,
+            &self.weights.w2[l].flat(),
+        );
 
         // residual connection
         accum(&mut self.state.x, &self.state.xb);
@@ -902,7 +970,11 @@ impl<'a> Llama2Runner<'a> {
         rmsnorm2(&mut self.state.x, self.weights.rms_final_weight.flat());
 
         // classifier into logits
-        matmul(&mut self.state.logits, &self.state.x, self.weights.wcls.flat());
+        matmul(
+            &mut self.state.logits,
+            &self.state.x,
+            self.weights.wcls.flat(),
+        );
 
         Ok(&mut self.state.logits)
     }
@@ -1065,7 +1137,8 @@ mod tests {
 
     #[test]
     fn test_checkpoint_loader() -> Result<()> {
-        let loader = Llama2CheckpointLoader::new("testdata/stories15M.bin", "testdata/tokenizer.bin")?;
+        let loader =
+            Llama2CheckpointLoader::new("testdata/stories15M.bin", "testdata/tokenizer.bin")?;
         let mut r = loader.reader();
         let conf = Llama2CheckpointLoader::load_config(&mut r)?;
         assert_eq!(conf.dim, 288);
@@ -1107,7 +1180,7 @@ mod tests {
         assert_eq!(tk.decode(2, 1001)?, "ER");
         let max_token_len = tk.vocab.iter().map(|v| v.len()).max().unwrap();
         assert_eq!(max_token_len, 27);
-        assert_eq!(tk.max_token_length, 27);
+        assert_eq!(tk.token_buf_len, 27);
         Ok(())
     }
 
@@ -1145,7 +1218,8 @@ mod tests {
 
     #[test]
     fn test_generate() -> Result<()> {
-        let checkpoint_loader = Llama2CheckpointLoader::new("testdata/stories15M.bin", "testdata/tokenizer.bin")?;
+        let checkpoint_loader =
+            Llama2CheckpointLoader::new("testdata/stories15M.bin", "testdata/tokenizer.bin")?;
 
         let (conf, weights, tokenizer) = checkpoint_loader.load()?;
         let mut sampler = Llama2Sampler::new(conf.vocab_size, 0.0, 0.0);

@@ -1,6 +1,6 @@
 mod llama2;
 use clap::Parser;
-use llama2::{Llama2CheckpointLoader, Llama2Runner, Llama2Sampler, Llama2Loader, Result};
+use llama2::{Llama2CheckpointLoader, Llama2Loader, Llama2Runner, Llama2Sampler, Result};
 use std::io::Write;
 
 #[derive(Parser, Debug)]
@@ -49,7 +49,11 @@ fn main() -> Result<()> {
         std::io::stdout().flush().unwrap();
     }
     println!();
-    println!("{} tokens/s, {} threads", output.average_tokens_per_seconds(), threads);
+    println!(
+        "{} tokens/s, {} threads",
+        output.average_tokens_per_seconds(),
+        threads
+    );
 
     Ok(())
 }
