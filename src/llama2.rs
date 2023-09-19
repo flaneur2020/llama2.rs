@@ -97,6 +97,7 @@ pub type Result<T> = std::result::Result<T, Llama2Error>;
 struct Tensor<'a> {
     data: &'a [f32],
     shape: Vec<usize>,
+    strides: Vec<usize>,
 }
 
 impl<'a> Tensor<'a> {
@@ -113,9 +114,77 @@ impl<'a> Tensor<'a> {
             });
         }
 
-        let tensor = Self { data, shape };
+        let strides = shape.iter().rev().fold(vec![1], |mut strides, &dim| {
+            strides.push(strides.last().unwrap() * dim);
+            strides
+        });
+        let tensor = Self { data, shape, strides };
         Ok(tensor)
     }
+
+    pub fn at(&self, idx: &[usize]) -> Result<f32> {
+        if idx.len() != self.shape.len() {
+            return Err(Llama2Error {
+                kind: Llama2ErrorKind::TensorError,
+                message: format!(
+                    "invalid index {:?} for tensor of shape {:?}",
+                    idx, self.shape
+                ),
+                source: None,
+            });
+        }
+        let mut offset = 0;
+        for (i, &dim) in idx.iter().enumerate() {
+            if dim >= self.shape[i] {
+                return Err(Llama2Error {
+                    kind: Llama2ErrorKind::TensorError,
+                    message: format!(
+                        "invalid index {:?} for tensor of shape {:?}",
+                        idx, self.shape
+                    ),
+                    source: None,
+                });
+            }
+            offset += dim * self.strides[i];
+        }
+        Ok(self.data[offset])
+    }
+
+    pub fn at_unchecked(&self, idx: &[usize]) -> f32 {
+        let mut offset = 0;
+        for (i, &dim) in idx.iter().enumerate() {
+            offset += dim * self.strides[i];
+        }
+        self.data[offset]
+    }
+
+    pub fn transpose(&self, perm: &[usize]) -> Result<Self> {
+        if perm.len() != self.shape.len() {
+            return Err(Llama2Error {
+                kind: Llama2ErrorKind::TensorError,
+                message: format!(
+                    "invalid permutation {:?} for tensor of shape {:?}",
+                    perm, self.shape
+                ),
+                source: None,
+            });
+        }
+        let mut new_shape = vec![0; self.shape.len()];
+        for (i, &dim) in perm.iter().enumerate() {
+            new_shape[i] = self.shape[dim];
+        }
+        let mut new_strides = vec![0; self.shape.len()];
+        for (i, &dim) in perm.iter().enumerate() {
+            new_strides[i] = self.strides[dim];
+        }
+        let tensor = Self {
+            data: self.data,
+            shape: new_shape,
+            strides: new_strides,
+        };
+        Ok(tensor)
+    }
+
 
     pub fn flat(&self) -> &[f32] {
         self.data
@@ -128,12 +197,12 @@ impl<'a> Tensor<'a> {
     pub fn to_vec(self) -> Result<Vec<Tensor<'a>>> {
         let mut result = Vec::with_capacity(self.shape[0]);
         for i in 0..self.shape[0] {
-            result.push(self.at(i)?);
+            result.push(self.row(i)?);
         }
         Ok(result)
     }
 
-    pub fn at(&self, idx: usize) -> Result<Self> {
+    pub fn row(&self, idx: usize) -> Result<Self> {
         if idx >= self.shape[0] {
             return Err(Llama2Error {
                 kind: Llama2ErrorKind::TensorError,
@@ -983,7 +1052,7 @@ impl<'a> Llama2Runner<'a> {
 
     pub fn forward(&mut self, token: usize, pos: usize) -> Result<&mut [f32]> {
         // copy the token embedding into x
-        let content_row = self.weights.token_embedding_table.at(token)?;
+        let content_row = self.weights.token_embedding_table.row(token)?;
         self.state.x.copy_from_slice(content_row.flat());
 
         // forward all the layers
@@ -1172,26 +1241,26 @@ mod tests {
     fn test_tensor() -> Result<()> {
         let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let t = Tensor::new(&v, vec![2, 3]).unwrap();
-        assert_eq!(t.at(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0]);
-        assert_eq!(t.at(1)?.flat().to_vec(), vec![4.0, 5.0, 6.0]);
+        assert_eq!(t.row(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(t.row(1)?.flat().to_vec(), vec![4.0, 5.0, 6.0]);
 
         let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let t = Tensor::new(&v, vec![2, 3, 1]).unwrap();
-        assert_eq!(t.at(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0]);
-        assert_eq!(t.at(1)?.flat().to_vec(), vec![4.0, 5.0, 6.0]);
-        assert_eq!(t.at(0)?.at(0)?.flat().to_vec(), vec![1.0]);
-        assert_eq!(t.at(0)?.at(1)?.flat().to_vec(), vec![2.0]);
-        assert_eq!(t.at(0)?.at(2)?.flat().to_vec(), vec![3.0]);
-        assert_eq!(t.at(1)?.at(0)?.flat().to_vec(), vec![4.0]);
-        assert_eq!(t.at(1)?.shape().to_vec(), vec![3, 1]);
+        assert_eq!(t.row(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(t.row(1)?.flat().to_vec(), vec![4.0, 5.0, 6.0]);
+        assert_eq!(t.row(0)?.row(0)?.flat().to_vec(), vec![1.0]);
+        assert_eq!(t.row(0)?.row(1)?.flat().to_vec(), vec![2.0]);
+        assert_eq!(t.row(0)?.row(2)?.flat().to_vec(), vec![3.0]);
+        assert_eq!(t.row(1)?.row(0)?.flat().to_vec(), vec![4.0]);
+        assert_eq!(t.row(1)?.shape().to_vec(), vec![3, 1]);
 
         let v = vec![
             1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
         ];
         let t = Tensor::new(&v, vec![2, 3, 2, 1]).unwrap();
-        assert_eq!(t.at(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(t.row(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         assert_eq!(
-            t.at(1)?.flat().to_vec(),
+            t.row(1)?.flat().to_vec(),
             vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
         );
         Ok(())
