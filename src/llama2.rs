@@ -114,10 +114,13 @@ impl<'a> Tensor<'a> {
             });
         }
 
-        let strides = shape.iter().rev().fold(vec![1], |mut strides, &dim| {
-            strides.push(strides.last().unwrap() * dim);
-            strides
-        });
+        let mut strides = Vec::with_capacity(shape.len());
+        strides.push(1);
+        for i in 0..shape.len()-1 {
+            strides.push(strides.last().unwrap() * shape[shape.len() - i - 1]);
+        }
+        strides.reverse();
+
         let tensor = Self { data, shape, strides };
         Ok(tensor)
     }
@@ -1263,6 +1266,31 @@ mod tests {
             t.row(1)?.flat().to_vec(),
             vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_transform() -> Result<()> {
+        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let t = Tensor::new(&v, vec![2, 3]).unwrap();
+        assert_eq!(t.strides.to_vec(), vec![3, 1]);
+        assert_eq!(t.at(&[0, 0])?, 1.0);
+        assert_eq!(t.at(&[0, 1])?, 2.0);
+        assert_eq!(t.at(&[0, 2])?, 3.0);
+        assert_eq!(t.at(&[0, 4]).unwrap_err().kind, Llama2ErrorKind::TensorError);
+        assert_eq!(t.at(&[1, 0])?, 4.0); // offset = 1 * 3 + 0 * 1 = 2
+        assert_eq!(t.at(&[1, 1])?, 5.0);
+        assert_eq!(t.at(&[1, 2])?, 6.0);
+
+        let t = t.transpose(&[1, 0])?;
+        assert_eq!(t.at(&[0, 0])?, 1.0);
+        assert_eq!(t.at(&[1, 0])?, 2.0);
+        assert_eq!(t.at(&[2, 0])?, 3.0);
+        assert_eq!(t.at(&[4, 0]).unwrap_err().kind, Llama2ErrorKind::TensorError);
+        assert_eq!(t.at(&[0, 1])?, 4.0);
+        assert_eq!(t.at(&[1, 1])?, 5.0);
+        assert_eq!(t.at(&[2, 1])?, 6.0);
+
         Ok(())
     }
 
