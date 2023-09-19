@@ -173,14 +173,14 @@ pub struct Llama2Weights<'a> {
     rms_att_weight: Vec<Tensor<'a>>, // (layer, dim) rmsnorm weights
     rms_ffn_weight: Vec<Tensor<'a>>, // (layer, dim)
     // weights for matmuls
-    wq: Vec<Tensor<'a>>, // (layer, n_head * head_size, dim)
-    wk: Vec<Tensor<'a>>, // (layer, n_head * head_size, kv_dim)
-    wv: Vec<Tensor<'a>>, // (layer, n_head * head_size, kv_dim)
-    wo: Vec<Tensor<'a>>, // (layer, n_head * head_size, dim)
+    wq: Vec<Tensor<'a>>, // (layer, embedding_dim, embedding_dim)
+    wk: Vec<Tensor<'a>>, // (layer, embedding_dim, kv_dim)
+    wv: Vec<Tensor<'a>>, // (layer, embeddin_dim, kv_dim)
+    wo: Vec<Tensor<'a>>, // (layer, embedding_dim, embedding_dim)
     // weights for ffn
-    w1: Vec<Tensor<'a>>, // (layer, hidden_dim, dim)
-    w2: Vec<Tensor<'a>>, // (layer, dim, hidden_dim)
-    w3: Vec<Tensor<'a>>, // (layer, hidden_dim, dim)
+    w1: Vec<Tensor<'a>>, // (layer, hidden_dim, embedding_dim)
+    w2: Vec<Tensor<'a>>, // (layer, embedding_dim, hidden_dim)
+    w3: Vec<Tensor<'a>>, // (layer, hidden_dim, embedding_dim)
     // final rmsnorm
     rms_final_weight: Tensor<'a>, // (dim, )
     // (optional) classifier weights for the logits, on the last layer
@@ -286,25 +286,18 @@ impl Llama2GgufLoader {
             .metadata()
             .get_u32("llama.attention.head_count_kv")
             .unwrap() as usize;
-        let seq_len = gf
-            .metadata()
-            .get_u32("llama.attention.context_length")
-            .unwrap() as usize;
+        let seq_len = gf.metadata().get_u32("llama.context_length").unwrap() as usize;
         let vocab_size = gf
             .metadata()
             .get_string_array("tokenizer.ggml.tokens")
             .unwrap()
             .len();
-        let dim = gf
-            .metadata()
-            .get_u32("llama.attention.embedding_length")
-            .unwrap() as usize
-            * n_heads;
+        let embedding_dim = gf.metadata().get_u32("llama.embedding_length").unwrap() as usize;
         Llama2Config {
             n_heads,
             n_kv_heads,
             n_layers,
-            embedding_dim: dim,
+            embedding_dim,
             hidden_dim,
             seq_len,
             vocab_size,
@@ -314,9 +307,15 @@ impl Llama2GgufLoader {
 
 impl Llama2Loader for Llama2GgufLoader {
     fn load(&self) -> Result<(Llama2Config, Llama2Weights, Llama2Tokenizer)> {
-        let gf = self.inner.load();
-
-        todo!();
+        let gf = self.inner.load().map_err(|err| Llama2Error {
+            kind: Llama2ErrorKind::IOError,
+            message: format!("failed to load gguf file"),
+            source: Some(Box::new(err)),
+        })?;
+        let config = Self::load_config(&gf);
+        let tokenizer = Self::load_tokenizer(&gf);
+        let weights = Llama2Weights::default();
+        Ok((config, weights, tokenizer))
     }
 }
 
@@ -535,8 +534,9 @@ impl Llama2Tokenizer {
         // TODO: pretty sure this isn't correct in the general case but I don't have the
         // energy to read more of the sentencepiece code to figure out what it's doing
         if !text.starts_with('\u{0}') {
-            let dummy_prefix = self.vocab_index.get(" ").unwrap();
-            tokens.push(*dummy_prefix);
+            if let Some(dummy_prefix) = self.vocab_index.get(" ") {
+                tokens.push(*dummy_prefix);
+            }
         }
 
         let chars = text.chars();
@@ -926,7 +926,7 @@ impl<'a> Llama2Runner<'a> {
             });
     }
 
-    // input: self.state.xb
+    // input: self.state.x
     // output: self.state.xb
     fn ffn(&mut self, l: usize) -> Result<()> {
         let hidden_dim = self.conf.hidden_dim;
@@ -1275,6 +1275,23 @@ mod tests {
             assert_eq!(tokens_in_string, tt.1, "failed to encode {}", tt.0);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_gguf() -> Result<()> {
+        let mut loader = Llama2GgufLoader::new("testdata/tinyllamas-stories-260k-f32.gguf")?;
+        let (conf, weights, tokenizer) = loader.load()?;
+        assert_eq!(conf.embedding_dim, 64);
+        assert_eq!(conf.vocab_size, 512);
+
+        let tokens = tokenizer.encode("hello world", true, true)?;
+        let tokens_in_string = tokens
+            .iter()
+            .map(|t| tokenizer.vocab[*t].clone())
+            .collect::<Vec<String>>()
+            .join(" - ");
+        assert_eq!(tokens_in_string, "<s> - he - ll - o - <0x20> - w - or - ld - </s>");
         Ok(())
     }
 
