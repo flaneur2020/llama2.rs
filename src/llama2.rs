@@ -116,13 +116,30 @@ impl<'a> Tensor<'a> {
 
         let mut strides = Vec::with_capacity(shape.len());
         strides.push(1);
-        for i in 0..shape.len()-1 {
+        for i in 0..shape.len() - 1 {
             strides.push(strides.last().unwrap() * shape[shape.len() - i - 1]);
         }
         strides.reverse();
 
-        let tensor = Self { data, shape, strides };
+        let tensor = Self {
+            data,
+            shape,
+            strides,
+        };
         Ok(tensor)
+    }
+
+    pub fn iter<'b>(&'b self) -> Box<dyn Iterator<Item=f32> + 'b> {
+        if self.shape.len() == 1 {
+            return Box::new(Tensor1DIterator {
+                tensor: self,
+                logical_pos: 0,
+            });
+        }
+        Box::new(TensorIterator {
+            tensor: self,
+            logical_pos: 0,
+        })
     }
 
     pub fn at(&self, idx: &[usize]) -> Result<f32> {
@@ -136,7 +153,6 @@ impl<'a> Tensor<'a> {
                 source: None,
             });
         }
-        let mut offset = 0;
         for (i, &dim) in idx.iter().enumerate() {
             if dim >= self.shape[i] {
                 return Err(Llama2Error {
@@ -148,9 +164,9 @@ impl<'a> Tensor<'a> {
                     source: None,
                 });
             }
-            offset += dim * self.strides[i];
         }
-        Ok(self.data[offset])
+
+        Ok(self.at_unchecked(idx))
     }
 
     pub fn at_unchecked(&self, idx: &[usize]) -> f32 {
@@ -166,7 +182,7 @@ impl<'a> Tensor<'a> {
             return Err(Llama2Error {
                 kind: Llama2ErrorKind::TensorError,
                 message: format!(
-                    "invalid permutation {:?} for tensor of shape {:?}",
+                    "invalid transpose {:?} for tensor of shape {:?}",
                     perm, self.shape
                 ),
                 source: None,
@@ -187,7 +203,6 @@ impl<'a> Tensor<'a> {
         };
         Ok(tensor)
     }
-
 
     pub fn flat(&self) -> &[f32] {
         self.data
@@ -223,6 +238,68 @@ impl<'a> Tensor<'a> {
             &self.data[start..start + chunk_size],
             self.shape[1..].to_vec(),
         )
+    }
+}
+
+struct TensorIterator<'a, 'b>
+where
+    'a: 'b,
+{
+    tensor: &'b Tensor<'a>,
+    logical_pos: usize,
+}
+
+impl<'a, 'b> Iterator for TensorIterator<'a, 'b> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if self.logical_pos >= self.tensor.data.len() {
+            return None;
+        }
+
+        let mut physical_pos = 0;
+        let mut lp = self.logical_pos;
+        for (dim, stride) in self
+            .tensor
+            .shape
+            .iter()
+            .rev()
+            .zip(self.tensor.strides.iter().rev())
+        {
+            let dim_n = lp % dim;
+            physical_pos += dim_n * stride;
+            lp = (lp - dim_n) / dim;
+        }
+        
+        self.logical_pos += 1;
+        Some(self.tensor.data[physical_pos])
+    }
+}
+
+struct Tensor1DIterator<'a, 'b>
+where
+    'a: 'b,
+{
+    tensor: &'b Tensor<'a>,
+    logical_pos: usize,
+}
+
+impl<'a, 'b> Iterator for Tensor1DIterator<'a, 'b> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if self.logical_pos >= self.tensor.shape[0] {
+            return None;
+        }
+
+        let physical_pos = self.logical_pos * self.tensor.strides[0];
+
+        self.logical_pos += 1;
+        Some(self.tensor.data[physical_pos])
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.tensor.shape[0] - self.logical_pos))
     }
 }
 
@@ -1261,7 +1338,10 @@ mod tests {
             1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
         ];
         let t = Tensor::new(&v, vec![2, 3, 2, 1]).unwrap();
-        assert_eq!(t.row(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(
+            t.row(0)?.flat().to_vec(),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        );
         assert_eq!(
             t.row(1)?.flat().to_vec(),
             vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
@@ -1277,19 +1357,45 @@ mod tests {
         assert_eq!(t.at(&[0, 0])?, 1.0);
         assert_eq!(t.at(&[0, 1])?, 2.0);
         assert_eq!(t.at(&[0, 2])?, 3.0);
-        assert_eq!(t.at(&[0, 4]).unwrap_err().kind, Llama2ErrorKind::TensorError);
+        assert_eq!(
+            t.at(&[0, 4]).unwrap_err().kind,
+            Llama2ErrorKind::TensorError
+        );
         assert_eq!(t.at(&[1, 0])?, 4.0); // offset = 1 * 3 + 0 * 1 = 2
         assert_eq!(t.at(&[1, 1])?, 5.0);
         assert_eq!(t.at(&[1, 2])?, 6.0);
 
         let t = t.transpose(&[1, 0])?;
+        assert_eq!(t.strides.to_vec(), vec![1, 3]);
         assert_eq!(t.at(&[0, 0])?, 1.0);
         assert_eq!(t.at(&[1, 0])?, 2.0);
         assert_eq!(t.at(&[2, 0])?, 3.0);
-        assert_eq!(t.at(&[4, 0]).unwrap_err().kind, Llama2ErrorKind::TensorError);
+        assert_eq!(
+            t.at(&[4, 0]).unwrap_err().kind,
+            Llama2ErrorKind::TensorError
+        );
         assert_eq!(t.at(&[0, 1])?, 4.0);
         assert_eq!(t.at(&[1, 1])?, 5.0);
         assert_eq!(t.at(&[2, 1])?, 6.0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_iterator() -> Result<()> {
+        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let t = Tensor::new(&v, vec![2, 3]).unwrap();
+        let tv = t.iter().collect::<Vec<_>>();
+        assert_eq!(tv, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+        let t = t.transpose(&[1, 0])?;
+        let tv = t.iter().collect::<Vec<_>>();
+        assert_eq!(tv, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+
+        let v = vec![1.0, 2.0, 3.0, 4.0];
+        let t = Tensor::new(&v, vec![4]).unwrap();
+        let tv = t.iter().collect::<Vec<_>>();
+        assert_eq!(tv, vec![1.0, 2.0, 3.0, 4.0]);
 
         Ok(())
     }
@@ -1388,7 +1494,10 @@ mod tests {
             .map(|t| tokenizer.vocab[*t].clone())
             .collect::<Vec<String>>()
             .join(" - ");
-        assert_eq!(tokens_in_string, "<s> - he - ll - o - <0x20> - w - or - ld - </s>");
+        assert_eq!(
+            tokens_in_string,
+            "<s> - he - ll - o - <0x20> - w - or - ld - </s>"
+        );
         Ok(())
     }
 

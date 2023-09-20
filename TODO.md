@@ -1,5 +1,5 @@
 - [x] parallel multihead
-- [ ] strides in Tensor
-- [ ] refactor to seperate each head
+- [x] strides in Tensor
+- [ ] cow in tensor data
 - [ ] llama2 gguf loader
 - [ ] execute llama6b
