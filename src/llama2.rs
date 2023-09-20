@@ -97,22 +97,18 @@ pub type Result<T> = std::result::Result<T, Llama2Error>;
 
 #[derive(Debug, Default, Clone)]
 struct Tensor<'a> {
-    data: Cow<'a, [f32]>,
+    buf: Cow<'a, [f32]>,
     shape: Vec<usize>,
     strides: Vec<usize>,
 }
 
 impl<'a> Tensor<'a> {
-    pub fn new(data: impl Into<Cow<'a, [f32]>>, shape: Vec<usize>) -> Result<Self> {
-        let data = data.into();
-        if data.len() != shape.iter().product() {
+    pub fn new(buf: impl Into<Cow<'a, [f32]>>, shape: Vec<usize>) -> Result<Self> {
+        let buf = buf.into();
+        if buf.len() != shape.iter().product() {
             return Err(Llama2Error {
                 kind: Llama2ErrorKind::TensorError,
-                message: format!(
-                    "invalid shape {:?} for data of length {}",
-                    shape,
-                    data.len()
-                ),
+                message: format!("invalid shape {:?} for data of length {}", shape, buf.len()),
                 source: None,
             });
         }
@@ -125,14 +121,14 @@ impl<'a> Tensor<'a> {
         strides.reverse();
 
         let tensor = Self {
-            data,
+            buf,
             shape,
             strides,
         };
         Ok(tensor)
     }
 
-    pub fn iter<'b>(&'b self) -> Box<dyn Iterator<Item=f32> + 'b> {
+    pub fn iter<'b>(&'b self) -> Box<dyn Iterator<Item = f32> + 'b> {
         if self.shape.len() == 1 {
             return Box::new(Tensor1DIterator {
                 tensor: self,
@@ -142,6 +138,7 @@ impl<'a> Tensor<'a> {
         Box::new(TensorIterator {
             tensor: self,
             logical_pos: 0,
+            idx_buf: vec![0; self.shape.len()],
         })
     }
 
@@ -173,11 +170,16 @@ impl<'a> Tensor<'a> {
     }
 
     pub fn at_unchecked(&self, idx: &[usize]) -> f32 {
+        let offset = self.buf_offset(idx);
+        self.buf[offset]
+    }
+
+    fn buf_offset(&self, idx: &[usize]) -> usize {
         let mut offset = 0;
-        for (i, &dim) in idx.iter().enumerate() {
-            offset += dim * self.strides[i];
+        for (dim, stride) in idx.iter().zip(self.strides.iter()) {
+            offset += dim * stride;
         }
-        self.data[offset]
+        offset
     }
 
     pub fn transpose(&self, perm: &[usize]) -> Result<Self> {
@@ -200,7 +202,7 @@ impl<'a> Tensor<'a> {
             new_strides[i] = self.strides[dim];
         }
         let tensor = Self {
-            data: self.data.clone(),
+            buf: self.buf.clone(),
             shape: new_shape,
             strides: new_strides,
         };
@@ -208,7 +210,7 @@ impl<'a> Tensor<'a> {
     }
 
     pub fn flat(&self) -> &[f32] {
-        &self.data
+        &self.buf
     }
 
     pub fn shape(&self) -> &[usize] {
@@ -232,20 +234,17 @@ impl<'a> Tensor<'a> {
             });
         }
         if self.shape.len() == 1 {
-            let data = self.slice_data(idx..idx+1);
+            let data = self.slice_buf(idx..idx + 1);
             return Self::new(data, vec![1]);
         }
         let chunk_size: usize = self.shape[1..].iter().product();
         let start = idx * chunk_size;
-        let data = self.slice_data(start..start+chunk_size);
-        Self::new(
-            data,
-            self.shape[1..].to_vec(),
-        )
+        let buf = self.slice_buf(start..start + chunk_size);
+        Self::new(buf, self.shape[1..].to_vec())
     }
 
-    fn slice_data(&self, range: Range<usize>) -> Cow<'a, [f32]> {
-        match self.data {
+    fn slice_buf(&self, range: Range<usize>) -> Cow<'a, [f32]> {
+        match self.buf {
             Cow::Borrowed(data) => Cow::from(&data[range]),
             Cow::Owned(ref data) => Cow::from(Vec::from(&data[range])),
         }
@@ -258,32 +257,33 @@ where
 {
     tensor: &'b Tensor<'a>,
     logical_pos: usize,
+    idx_buf: Vec<usize>,
 }
 
 impl<'a, 'b> Iterator for TensorIterator<'a, 'b> {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
-        if self.logical_pos >= self.tensor.data.len() {
+        if self.logical_pos >= self.tensor.buf.len() {
             return None;
         }
 
-        let mut physical_pos = 0;
+        self.idx_buf.fill(0);
         let mut lp = self.logical_pos;
-        for (dim, stride) in self
+        for (dim, idx) in self
             .tensor
-            .shape
+            .shape()
             .iter()
             .rev()
-            .zip(self.tensor.strides.iter().rev())
+            .zip(self.idx_buf.iter_mut().rev())
         {
-            let dim_n = lp % dim;
-            physical_pos += dim_n * stride;
-            lp = (lp - dim_n) / dim;
+            *idx = lp % dim;
+            lp = (lp - *idx) / dim;
         }
-        
+        let offset = self.tensor.buf_offset(&self.idx_buf);
+
         self.logical_pos += 1;
-        Some(self.tensor.data[physical_pos])
+        Some(self.tensor.buf[offset])
     }
 }
 
@@ -306,7 +306,7 @@ impl<'a, 'b> Iterator for Tensor1DIterator<'a, 'b> {
         let physical_pos = self.logical_pos * self.tensor.strides[0];
 
         self.logical_pos += 1;
-        Some(self.tensor.data[physical_pos])
+        Some(self.tensor.buf[physical_pos])
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
