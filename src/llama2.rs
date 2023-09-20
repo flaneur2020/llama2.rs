@@ -232,19 +232,19 @@ impl<'a> Tensor<'a> {
             });
         }
         if self.shape.len() == 1 {
-            let data = self.data_by_range(idx..idx+1);
+            let data = self.slice_data(idx..idx+1);
             return Self::new(data, vec![1]);
         }
         let chunk_size: usize = self.shape[1..].iter().product();
         let start = idx * chunk_size;
-        let data = self.data_by_range(start..start+chunk_size);
+        let data = self.slice_data(start..start+chunk_size);
         Self::new(
             data,
             self.shape[1..].to_vec(),
         )
     }
 
-    fn data_by_range(&self, range: Range<usize>) -> Cow<'a, [f32]> {
+    fn slice_data(&self, range: Range<usize>) -> Cow<'a, [f32]> {
         match self.data {
             Cow::Borrowed(data) => Cow::from(&data[range]),
             Cow::Owned(ref data) => Cow::from(Vec::from(&data[range])),
