@@ -4,10 +4,12 @@ use memmap::Mmap;
 use memmap::MmapOptions;
 use rand::Rng;
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::mem;
 use std::ops::AddAssign;
+use std::ops::Range;
 use std::time::Duration;
 use std::time::Instant;
 use std::vec;
@@ -95,13 +97,14 @@ pub type Result<T> = std::result::Result<T, Llama2Error>;
 
 #[derive(Debug, Default, Clone)]
 struct Tensor<'a> {
-    data: &'a [f32],
+    data: Cow<'a, [f32]>,
     shape: Vec<usize>,
     strides: Vec<usize>,
 }
 
 impl<'a> Tensor<'a> {
-    pub fn new(data: &'a [f32], shape: Vec<usize>) -> Result<Self> {
+    pub fn new(data: impl Into<Cow<'a, [f32]>>, shape: Vec<usize>) -> Result<Self> {
+        let data = data.into();
         if data.len() != shape.iter().product() {
             return Err(Llama2Error {
                 kind: Llama2ErrorKind::TensorError,
@@ -197,7 +200,7 @@ impl<'a> Tensor<'a> {
             new_strides[i] = self.strides[dim];
         }
         let tensor = Self {
-            data: self.data,
+            data: self.data.clone(),
             shape: new_shape,
             strides: new_strides,
         };
@@ -205,7 +208,7 @@ impl<'a> Tensor<'a> {
     }
 
     pub fn flat(&self) -> &[f32] {
-        self.data
+        &self.data
     }
 
     pub fn shape(&self) -> &[usize] {
@@ -229,15 +232,23 @@ impl<'a> Tensor<'a> {
             });
         }
         if self.shape.len() == 1 {
-            let data = &self.data[idx..idx + 1];
+            let data = self.data_by_range(idx..idx+1);
             return Self::new(data, vec![1]);
         }
         let chunk_size: usize = self.shape[1..].iter().product();
         let start = idx * chunk_size;
+        let data = self.data_by_range(start..start+chunk_size);
         Self::new(
-            &self.data[start..start + chunk_size],
+            data,
             self.shape[1..].to_vec(),
         )
+    }
+
+    fn data_by_range(&self, range: Range<usize>) -> Cow<'a, [f32]> {
+        match self.data {
+            Cow::Borrowed(data) => Cow::from(&data[range]),
+            Cow::Owned(ref data) => Cow::from(Vec::from(&data[range])),
+        }
     }
 }
 
@@ -377,7 +388,7 @@ impl<'a> Llama2CheckpointReader<'a> {
         };
         self.total_bytes += elems * size_f32;
         self.buf = &self.buf[elems * size_f32..];
-        return Tensor::new(data_f32, shape);
+        return Tensor::new(Cow::from(data_f32), shape);
     }
 }
 
