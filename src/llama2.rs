@@ -10,6 +10,7 @@ use std::fs::File;
 use std::mem;
 use std::ops::AddAssign;
 use std::ops::Range;
+use std::ops::RangeBounds;
 use std::time::Duration;
 use std::time::Instant;
 use std::vec;
@@ -207,6 +208,32 @@ impl<'a> Tensor<'a> {
             strides: new_strides,
         };
         Ok(tensor)
+    }
+
+    pub fn crop(&self, limits: &[(usize, usize)]) -> Result<Self> {
+        let offset = self.buf_offset(&limits.iter().map(|&(start, _)| start).collect::<Vec<_>>());
+        let buf = self.slice_buf(offset..self.buf.len());
+        let shape = limits
+            .iter()
+            .map(|&(start, end)| end - start)
+            .collect::<Vec<_>>();
+        Ok(Self {
+            buf,
+            shape,
+            strides: self.strides.clone(),
+        })
+    }
+
+    pub fn subtensor(&self, row: usize) -> Result<Self> {
+        let mut idx = vec![0; self.shape.len()];
+        idx[0] = row;
+        let offset = self.buf_offset(&idx);
+        let buf = self.slice_buf(offset..self.buf.len());
+        Ok(Self {
+            buf,
+            shape: self.shape[1..].to_vec(),
+            strides: self.strides[1..].to_vec(),
+        })
     }
 
     pub fn flat(&self) -> &[f32] {
