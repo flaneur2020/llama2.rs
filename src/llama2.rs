@@ -227,6 +227,24 @@ impl<'a> Tensor<'a> {
     }
 
     pub fn subtensor(&self, row: usize) -> Result<Self> {
+        if self.shape.len() <= 1 {
+            return Err(Llama2Error {
+                kind: Llama2ErrorKind::TensorError,
+                message: "cannot subtensor a 1D tensor".to_string(),
+                source: None,
+            });
+        }
+
+        if self.is_contiguous() {
+            let offset = row * self.strides[0];
+            let buf = self.slice_buf(offset..offset + self.strides[0]);
+            return Ok(Self {
+                buf,
+                shape: self.shape[1..].to_vec(),
+                strides: self.strides[1..].to_vec(),
+            });
+        }
+
         let mut idx = vec![0; self.shape.len()];
         idx[0] = row;
         let offset = self.buf_offset(&idx);
@@ -239,14 +257,22 @@ impl<'a> Tensor<'a> {
     }
 
     pub fn is_contiguous(&self) -> bool {
-        let mut accum = 1;
-        for stride in self.strides.iter().rev() {
-            if *stride != accum {
-                return false
-            }
-            accum *= *stride;
+        if self.strides.len() == 0 {
+            return true;
         }
-        false
+
+        if self.strides.last() != Some(&1) {
+            return false;
+        }
+
+        let mut last_stride = 1;
+        for i in (1..self.shape.len()).rev() {
+            if last_stride != self.strides[i] {
+                return false;
+            }
+            last_stride *= self.shape[i];
+        }
+        true
     }
 
     pub fn contiguous(&self) -> Result<Self> {
@@ -266,30 +292,12 @@ impl<'a> Tensor<'a> {
         &self.shape
     }
 
-    pub fn to_vec(self) -> Result<Vec<Tensor<'a>>> {
+    pub fn subtensors(self) -> Result<Vec<Tensor<'a>>> {
         let mut result = Vec::with_capacity(self.shape[0]);
         for i in 0..self.shape[0] {
-            result.push(self.row(i)?);
+            result.push(self.subtensor(i)?);
         }
         Ok(result)
-    }
-
-    pub fn row(&self, idx: usize) -> Result<Self> {
-        if idx >= self.shape[0] {
-            return Err(Llama2Error {
-                kind: Llama2ErrorKind::TensorError,
-                message: format!("index {} out of bounds for shape {:?}", idx, self.shape),
-                source: None,
-            });
-        }
-        if self.shape.len() == 1 {
-            let data = self.slice_buf(idx..idx + 1);
-            return Self::new(data, vec![1]);
-        }
-        let chunk_size: usize = self.shape[1..].iter().product();
-        let start = idx * chunk_size;
-        let buf = self.slice_buf(start..start + chunk_size);
-        Self::new(buf, self.shape[1..].to_vec())
     }
 
     fn slice_buf(&self, range: Range<usize>) -> Cow<'a, [f32]> {
@@ -603,47 +611,47 @@ impl Llama2CheckpointLoader {
         weights.token_embedding_table = r.read_tensor(vec![conf.vocab_size, conf.embedding_dim])?;
         weights.rms_att_weight = r
             .read_tensor(vec![conf.n_layers, conf.embedding_dim])?
-            .to_vec()?;
+            .subtensors()?;
         weights.wq = r
             .read_tensor(vec![
                 conf.n_layers,
                 conf.embedding_dim,
                 conf.n_heads * head_size,
             ])?
-            .to_vec()?;
+            .subtensors()?;
         weights.wk = r
             .read_tensor(vec![
                 conf.n_layers,
                 conf.embedding_dim,
                 conf.n_kv_heads * head_size,
             ])?
-            .to_vec()?;
+            .subtensors()?;
         weights.wv = r
             .read_tensor(vec![
                 conf.n_layers,
                 conf.embedding_dim,
                 conf.n_kv_heads * head_size,
             ])?
-            .to_vec()?;
+            .subtensors()?;
         weights.wo = r
             .read_tensor(vec![
                 conf.n_layers,
                 conf.n_heads * head_size,
                 conf.embedding_dim,
             ])?
-            .to_vec()?;
+            .subtensors()?;
         weights.rms_ffn_weight = r
             .read_tensor(vec![conf.n_layers, conf.embedding_dim])?
-            .to_vec()?;
+            .subtensors()?;
         weights.w1 = r
             .read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.embedding_dim])?
-            .to_vec()?;
+            .subtensors()?;
         weights.w2 = r
             .read_tensor(vec![conf.n_layers, conf.embedding_dim, conf.hidden_dim])?
-            .to_vec()?;
+            .subtensors()?;
         weights.w3 = r
             .read_tensor(vec![conf.n_layers, conf.hidden_dim, conf.embedding_dim])?
-            .to_vec()?;
+            .subtensors()?;
         weights.rms_final_weight = r.read_tensor(vec![conf.embedding_dim])?;
         let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_real (for RoPE)
         let _ = r.read_tensor(vec![conf.seq_len * head_size / 2])?; // skip what used to be freq_cis_imag (for RoPE)
@@ -1192,7 +1200,7 @@ impl<'a> Llama2Runner<'a> {
 
     pub fn forward(&mut self, token: usize, pos: usize) -> Result<&mut [f32]> {
         // copy the token embedding into x
-        let content_row = self.weights.token_embedding_table.row(token)?;
+        let content_row = self.weights.token_embedding_table.subtensor(token)?;
         self.state.x.copy_from_slice(content_row.flat());
 
         // forward all the layers
@@ -1381,29 +1389,31 @@ mod tests {
     fn test_tensor() -> Result<()> {
         let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let t = Tensor::new(&v, vec![2, 3]).unwrap();
-        assert_eq!(t.row(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0]);
-        assert_eq!(t.row(1)?.flat().to_vec(), vec![4.0, 5.0, 6.0]);
+        assert_eq!(t.subtensor(0)?.iter().collect::<Vec<_>>(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(t.subtensor(1)?.iter().collect::<Vec<_>>(), vec![4.0, 5.0, 6.0]);
 
         let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let t = Tensor::new(&v, vec![2, 3, 1]).unwrap();
-        assert_eq!(t.row(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0]);
-        assert_eq!(t.row(1)?.flat().to_vec(), vec![4.0, 5.0, 6.0]);
-        assert_eq!(t.row(0)?.row(0)?.flat().to_vec(), vec![1.0]);
-        assert_eq!(t.row(0)?.row(1)?.flat().to_vec(), vec![2.0]);
-        assert_eq!(t.row(0)?.row(2)?.flat().to_vec(), vec![3.0]);
-        assert_eq!(t.row(1)?.row(0)?.flat().to_vec(), vec![4.0]);
-        assert_eq!(t.row(1)?.shape().to_vec(), vec![3, 1]);
+        assert_eq!(format!("{:?}", t.strides), "[3, 1, 1]");
+        assert_eq!(t.is_contiguous(), true);
+        assert_eq!(t.subtensor(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(t.subtensor(1)?.flat().to_vec(), vec![4.0, 5.0, 6.0]);
+        assert_eq!(t.subtensor(0)?.subtensor(0)?.flat().to_vec(), vec![1.0]);
+        assert_eq!(t.subtensor(0)?.subtensor(1)?.flat().to_vec(), vec![2.0]);
+        assert_eq!(t.subtensor(0)?.subtensor(2)?.flat().to_vec(), vec![3.0]);
+        assert_eq!(t.subtensor(1)?.subtensor(0)?.flat().to_vec(), vec![4.0]);
+        assert_eq!(t.subtensor(1)?.shape().to_vec(), vec![3, 1]);
 
         let v = vec![
             1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
         ];
         let t = Tensor::new(&v, vec![2, 3, 2, 1]).unwrap();
         assert_eq!(
-            t.row(0)?.flat().to_vec(),
+            t.subtensor(0)?.flat().to_vec(),
             vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
         );
         assert_eq!(
-            t.row(1)?.flat().to_vec(),
+            t.subtensor(1)?.flat().to_vec(),
             vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
         );
         Ok(())
