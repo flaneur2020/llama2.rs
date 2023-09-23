@@ -1,6 +1,6 @@
 - [x] parallel multihead
 - [x] strides in Tensor
 - [x] cow in tensor data
-- [ ] subtensor
-- [ ] llama2 gguf loader
+- [x] subtensor
+- [ ] llama2 gguf load weights
 - [ ] execute llama6b

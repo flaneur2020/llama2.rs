@@ -11,6 +11,7 @@ use std::mem;
 use std::ops::AddAssign;
 use std::ops::Range;
 use std::ops::RangeBounds;
+use std::slice;
 use std::time::Duration;
 use std::time::Instant;
 use std::vec;
@@ -209,7 +210,6 @@ impl<'a> Tensor<'a> {
         };
         Ok(tensor)
     }
-
 
     // todo: test it
     pub fn crop(&self, limits: &[(usize, usize)]) -> Result<Self> {
@@ -466,6 +466,95 @@ impl Llama2GgufLoader {
         })?;
 
         Ok(Self { inner })
+    }
+
+    fn load_weights<'a>(gf: &GGUFFile<'a>, n_layers: usize) -> Result<Llama2Weights<'a>> {
+        // [64 (dim), 512 (vocab_size)]
+        let token_embedding_table = Self::load_tensor(gf, "token_embd.weight")?
+            .transpose(&[1, 0])?
+            .contiguous()?;
+        let mut wq = vec![];
+        let mut wk = vec![];
+        let mut wv = vec![];
+        let mut wo = vec![];
+        let mut w1 = vec![];
+        let mut w2 = vec![];
+        let mut w3 = vec![];
+        let mut rms_att_weight = vec![];
+        let mut rms_ffn_weight = vec![];
+        for layer in 0..=n_layers {
+            wq.push(Self::load_tensor(
+                gf,
+                &format!("blk.{}.attn_q.weight", layer),
+            )?);
+            wk.push(Self::load_tensor(
+                gf,
+                &format!("blk.{}.attn_k.weight", layer),
+            )?);
+            wv.push(Self::load_tensor(
+                gf,
+                &format!("blk.{}.attn_v.weight", layer),
+            )?);
+            wo.push(Self::load_tensor(
+                gf,
+                &format!("blk.{}.attn_o.weight", layer),
+            )?);
+            w1.push(
+                Self::load_tensor(gf, &format!("blk.{}.ffn_gate.weight", layer))?
+                    .transpose(&[1, 0])?
+                    .contiguous()?,
+            );
+            w2.push(
+                Self::load_tensor(gf, &format!("blk.{}.ffn_down.weight", layer))?
+                    .transpose(&[1, 0])?
+                    .contiguous()?,
+            );
+            w3.push(
+                Self::load_tensor(gf, &format!("blk.{}.ffn_up.weight", layer))?
+                    .transpose(&[1, 0])?
+                    .contiguous()?,
+            );
+            rms_att_weight.push(Self::load_tensor(
+                gf,
+                &format!("blk.{}.attn_norm.weight", layer),
+            )?);
+            rms_ffn_weight.push(Self::load_tensor(
+                gf,
+                &format!("blk.{}.ffn_norm.weight", layer),
+            )?);
+        }
+        let rms_final_weight = Self::load_tensor(gf, "output_norm.weight")?;
+        let wcls = Self::load_tensor(gf, "output.weight")?
+            .transpose(&[1, 0])?
+            .contiguous()?;
+        Ok(Llama2Weights {
+            token_embedding_table,
+            wq,
+            wk,
+            wv,
+            wo,
+            w1,
+            w2,
+            w3,
+            rms_att_weight,
+            rms_ffn_weight,
+            rms_final_weight,
+            wcls,
+        })
+    }
+
+    fn load_tensor<'a>(gf: &GGUFFile<'a>, name: &str) -> Result<Tensor<'a>> {
+        let info = gf.get_tensor_info(name).unwrap();
+        let len = info.data().len();
+        assert_eq!(
+            len % std::mem::size_of::<f32>(),
+            0,
+            "Length of slice must be multiple of f32 size"
+        );
+        let new_len = len / std::mem::size_of::<f32>();
+        let ptr = info.data().as_ptr() as *const f32;
+        let f32_data = unsafe { slice::from_raw_parts(ptr, new_len) };
+        Tensor::new(f32_data, info.dimensions().to_vec())
     }
 
     fn load_tokenizer(gf: &GGUFFile) -> Llama2Tokenizer {
@@ -1389,8 +1478,14 @@ mod tests {
     fn test_tensor() -> Result<()> {
         let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let t = Tensor::new(&v, vec![2, 3]).unwrap();
-        assert_eq!(t.subtensor(0)?.iter().collect::<Vec<_>>(), vec![1.0, 2.0, 3.0]);
-        assert_eq!(t.subtensor(1)?.iter().collect::<Vec<_>>(), vec![4.0, 5.0, 6.0]);
+        assert_eq!(
+            t.subtensor(0)?.iter().collect::<Vec<_>>(),
+            vec![1.0, 2.0, 3.0]
+        );
+        assert_eq!(
+            t.subtensor(1)?.iter().collect::<Vec<_>>(),
+            vec![4.0, 5.0, 6.0]
+        );
 
         let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let t = Tensor::new(&v, vec![2, 3, 1]).unwrap();
