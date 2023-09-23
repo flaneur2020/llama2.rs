@@ -55,7 +55,7 @@ fn rmsnorm_inplace(x: &mut [f32], w: &[f32]) {
 fn matmul(xout: &mut [f32], x: &[f32], w: &[f32]) {
     // W (d,n) @ x (n,) -> xout (d,)
     let x_dim = x.len();
-    xout.par_iter_mut().enumerate().for_each(|(i, xo)| {
+    xout.iter_mut().enumerate().for_each(|(i, xo)| {
         *xo = 0.0;
         for j in 0..x.len() {
             *xo += w[i * x_dim + j] * x[j];
@@ -228,6 +228,7 @@ impl<'a> Tensor<'a> {
 
     pub fn subtensor(&self, row: usize) -> Result<Self> {
         if self.shape.len() <= 1 {
+            panic!("can not subtensor a 1D tensor");
             return Err(Llama2Error {
                 kind: Llama2ErrorKind::TensorError,
                 message: "cannot subtensor a 1D tensor".to_string(),
@@ -382,6 +383,12 @@ pub struct Llama2Config {
     pub seq_len: usize,
 }
 
+impl Llama2Config {
+    pub fn kv_dim(&self) -> usize {
+        (self.embedding_dim * self.n_kv_heads) / self.n_heads
+    }
+}
+
 #[derive(Default)]
 pub struct Llama2Weights<'a> {
     // token embedding table
@@ -482,7 +489,7 @@ impl Llama2GgufLoader {
         let mut w3 = vec![];
         let mut rms_att_weight = vec![];
         let mut rms_ffn_weight = vec![];
-        for layer in 0..=n_layers {
+        for layer in 0..n_layers {
             wq.push(Self::load_tensor(
                 gf,
                 &format!("blk.{}.attn_q.weight", layer),
@@ -497,7 +504,7 @@ impl Llama2GgufLoader {
             )?);
             wo.push(Self::load_tensor(
                 gf,
-                &format!("blk.{}.attn_o.weight", layer),
+                &format!("blk.{}.attn_output.weight", layer),
             )?);
             w1.push(
                 Self::load_tensor(gf, &format!("blk.{}.ffn_gate.weight", layer))?
@@ -544,7 +551,17 @@ impl Llama2GgufLoader {
     }
 
     fn load_tensor<'a>(gf: &GGUFFile<'a>, name: &str) -> Result<Tensor<'a>> {
-        let info = gf.get_tensor_info(name).unwrap();
+        let info = match gf.get_tensor_info(name) {
+            None => {
+                return Err(Llama2Error {
+                    kind: Llama2ErrorKind::IOError,
+                    message: format!("failed to find tensor {}", name),
+                    source: None,
+                })
+            }
+            Some(info) => info,
+        };
+
         let len = info.data().len();
         assert_eq!(
             len % std::mem::size_of::<f32>(),
@@ -620,7 +637,7 @@ impl Llama2Loader for Llama2GgufLoader {
         })?;
         let config = Self::load_config(&gf);
         let tokenizer = Self::load_tokenizer(&gf);
-        let weights = Llama2Weights::default();
+        let weights = Self::load_weights(&gf, config.n_layers)?;
         Ok((config, weights, tokenizer))
     }
 }
@@ -1102,8 +1119,8 @@ struct Llama2State {
     attn: Vec<Vec<f32>>, // buffer for scores/attention values (n_heads, seq_len)
     logits: Vec<f32>,    // output logits (vocab_size, )
     // ProbIndex *probindex; // buffer used in top-p sampling
-    key_cache: Vec<Vec<Vec<f32>>>,   // (layer, seq_len, dim)
-    value_cache: Vec<Vec<Vec<f32>>>, // (layer, seq_len, dim)
+    key_cache: Vec<Vec<Vec<f32>>>,   // (layer, seq_len, kv_dim)
+    value_cache: Vec<Vec<Vec<f32>>>, // (layer, seq_len, kv_dim)
 }
 
 pub struct Llama2Runner<'a> {
@@ -1126,8 +1143,8 @@ impl<'a> Llama2Runner<'a> {
             hb: vec![0.0; conf.hidden_dim],
             hb2: vec![0.0; conf.hidden_dim],
             q: vec![0.0; conf.embedding_dim],
-            k: vec![0.0; conf.embedding_dim],
-            v: vec![0.0; conf.embedding_dim],
+            k: vec![0.0; conf.kv_dim()],
+            v: vec![0.0; conf.kv_dim()],
             attn: (0..conf.n_heads)
                 .map(|_| vec![0.0; conf.embedding_dim])
                 .collect(),
@@ -1135,14 +1152,14 @@ impl<'a> Llama2Runner<'a> {
             key_cache: (0..conf.n_layers)
                 .map(|_| {
                     (0..conf.seq_len)
-                        .map(|_| vec![0.0; conf.embedding_dim])
+                        .map(|_| vec![0.0; conf.kv_dim()])
                         .collect()
                 })
                 .collect(),
             value_cache: (0..conf.n_layers)
                 .map(|_| {
                     (0..conf.seq_len)
-                        .map(|_| vec![0.0; conf.embedding_dim])
+                        .map(|_| vec![0.0; conf.kv_dim()])
                         .collect()
                 })
                 .collect(),
@@ -1197,17 +1214,19 @@ impl<'a> Llama2Runner<'a> {
 
     fn multi_head_attention(&mut self, l: usize, pos: usize) {
         let head_size = self.head_size();
+        let kv_heads_per_head = self.conf.n_heads / self.conf.n_kv_heads;
         self.state
             .attn
             .par_iter_mut()
             .zip(self.state.xb.par_chunks_exact_mut(head_size))
             .enumerate()
             .for_each(|(h, (attn, xb))| {
+                let kvh = h / kv_heads_per_head;
                 // get the query vector for this head
-                let q = &self.state.q[h * head_size..h * head_size + head_size];
+                let q = &self.state.q[kvh * head_size..kvh * head_size + head_size];
                 // iterate over all timesteps, including the current one
                 for t in 0..(pos + 1) {
-                    let k = &self.state.key_cache[l][t][h * head_size..h * head_size + head_size];
+                    let k = &self.state.key_cache[l][t][kvh * head_size..kvh * head_size + head_size];
                     // calculate the attention score as the dot product of q and k
                     let mut score = (0..head_size).map(|i| q[i] * k[i]).sum::<f32>();
                     score /= (head_size as f32).sqrt();
@@ -1221,7 +1240,7 @@ impl<'a> Llama2Runner<'a> {
                 // weighted sum of the values, store back into xb
                 xb.fill(0.0);
                 for t in 0..pos + 1 {
-                    let v = &self.state.value_cache[l][t][h * head_size..h * head_size + head_size];
+                    let v = &self.state.value_cache[l][t][kvh * head_size..kvh * head_size + head_size];
                     // get the attention weight for this timestep
                     let a = attn[t];
                     // accumulate the weighted value into xb
@@ -1659,26 +1678,6 @@ mod tests {
     }
 
     #[test]
-    fn test_load_gguf() -> Result<()> {
-        let mut loader = Llama2GgufLoader::new("testdata/tinyllamas-stories-260k-f32.gguf")?;
-        let (conf, weights, tokenizer) = loader.load()?;
-        assert_eq!(conf.embedding_dim, 64);
-        assert_eq!(conf.vocab_size, 512);
-
-        let tokens = tokenizer.encode("hello world", true, true)?;
-        let tokens_in_string = tokens
-            .iter()
-            .map(|t| tokenizer.vocab[*t].clone())
-            .collect::<Vec<String>>()
-            .join(" - ");
-        assert_eq!(
-            tokens_in_string,
-            "<s> - he - ll - o - <0x20> - w - or - ld - </s>"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn test_generate() -> Result<()> {
         let checkpoint_loader =
             Llama2CheckpointLoader::new("testdata/stories15M.bin", "testdata/tokenizer.bin")?;
@@ -1686,6 +1685,35 @@ mod tests {
         let (conf, weights, tokenizer) = checkpoint_loader.load()?;
         let mut sampler = Llama2Sampler::new(conf.vocab_size, 0.0, 0.0);
         let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
+        let output = runner.generate("hello, world", 15, &mut sampler)?;
+        let s = output.collect::<Result<Vec<String>>>()?.join("");
+        assert_eq!(
+            s,
+            "ers. They were very friendly and always had a smile on their faces. One"
+        );
+        Ok(())
+    }
+
+
+    #[test]
+    fn test_load_gguf() -> Result<()> {
+        let mut loader = Llama2GgufLoader::new("testdata/tinyllamas-stories-260k-f32.gguf")?;
+        let (conf, weights, tokenizer) = loader.load()?;
+        assert_eq!(conf.embedding_dim, 64);
+        assert_eq!(conf.vocab_size, 512);
+        assert_eq!(weights.token_embedding_table.shape(), &[512, 64]);
+        assert_eq!(weights.wq[0].shape(), &[64, 64]);
+        assert_eq!(weights.wk[0].shape(), &[64, 32]);
+
+        let mut sampler = Llama2Sampler::new(conf.vocab_size, 0.0, 0.0);
+        let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
+        assert_eq!(runner.state.x.len(), 64);
+        assert_eq!(runner.state.k.len(), 32);
+        assert_eq!(runner.state.xb.len(), 64);
+        // matmul (xb, wk)
+        // xb(64, ) @ wk(64, 32)
+        // out: (32, )
+
         let output = runner.generate("hello, world", 15, &mut sampler)?;
         let s = output.collect::<Result<Vec<String>>>()?.join("");
         assert_eq!(
