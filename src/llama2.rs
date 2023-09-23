@@ -210,6 +210,8 @@ impl<'a> Tensor<'a> {
         Ok(tensor)
     }
 
+
+    // todo: test it
     pub fn crop(&self, limits: &[(usize, usize)]) -> Result<Self> {
         let offset = self.buf_offset(&limits.iter().map(|&(start, _)| start).collect::<Vec<_>>());
         let buf = self.slice_buf(offset..self.buf.len());
@@ -234,6 +236,26 @@ impl<'a> Tensor<'a> {
             shape: self.shape[1..].to_vec(),
             strides: self.strides[1..].to_vec(),
         })
+    }
+
+    pub fn is_contiguous(&self) -> bool {
+        let mut accum = 1;
+        for stride in self.strides.iter().rev() {
+            if *stride != accum {
+                return false
+            }
+            accum *= *stride;
+        }
+        false
+    }
+
+    pub fn contiguous(&self) -> Result<Self> {
+        if self.is_contiguous() {
+            return Ok(self.clone());
+        }
+
+        let buf = self.iter().collect::<Vec<_>>();
+        Self::new(buf, self.shape.clone())
     }
 
     pub fn flat(&self) -> &[f32] {
@@ -1415,6 +1437,18 @@ mod tests {
         assert_eq!(t.at(&[0, 1])?, 4.0);
         assert_eq!(t.at(&[1, 1])?, 5.0);
         assert_eq!(t.at(&[2, 1])?, 6.0);
+
+        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let t = Tensor::new(&v, vec![2, 3]).unwrap(); // 2x3
+        let t1 = t.subtensor(0)?; // (3, )
+        assert_eq!(t1.shape(), &[3]);
+        assert_eq!(t1.at(&[0])?, 1.0); // offset = 1 * 3 + 0 * 1 = 2
+        assert_eq!(t1.at(&[1])?, 2.0);
+        assert_eq!(t1.at(&[2])?, 3.0);
+        let t2 = t.transpose(&[1, 0])?;
+        assert_eq!(t2.shape.to_vec(), vec![3, 2]);
+        let t3 = t.subtensor(1)?; // (2, )
+        assert_eq!(t3.at(&[0])?, 4.0);
 
         Ok(())
     }
