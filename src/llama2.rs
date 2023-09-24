@@ -1,5 +1,6 @@
 use crabml::gguf::GGUFFile;
 use crabml::gguf::GGUFFileLoader;
+use crabml::gguf::GGUFTensorInfo;
 use memmap::Mmap;
 use memmap::MmapOptions;
 use rand::Rng;
@@ -9,12 +10,14 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::mem;
 use std::ops::AddAssign;
-use std::ops::Range;
-use std::ops::RangeBounds;
 use std::slice;
 use std::time::Duration;
 use std::time::Instant;
 use std::vec;
+use crate::tensor::Tensor;
+use crate::error::Result;
+use crate::error::Llama2ErrorKind;
+use crate::error::Llama2Error;
 
 fn accum(a: &mut [f32], b: &[f32]) {
     for (a, b) in a.iter_mut().zip(b.iter()) {
@@ -63,314 +66,6 @@ fn matmul(xout: &mut [f32], x: &[f32], w: &[f32]) {
     });
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum Llama2ErrorKind {
-    IOError,
-    BadInput,
-    Unexpected,
-    TensorError,
-}
-
-#[derive(Debug)]
-pub struct Llama2Error {
-    kind: Llama2ErrorKind,
-    message: String,
-    source: Option<Box<dyn std::error::Error>>,
-}
-
-impl std::fmt::Display for Llama2Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.kind)?;
-        write!(f, "{}", self.message)?;
-        if let Some(source) = &self.source {
-            write!(f, ": {}", source)?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for Llama2Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.as_deref()
-    }
-}
-
-pub type Result<T> = std::result::Result<T, Llama2Error>;
-
-#[derive(Debug, Default, Clone)]
-struct Tensor<'a> {
-    buf: Cow<'a, [f32]>,
-    shape: Vec<usize>,
-    strides: Vec<usize>,
-}
-
-impl<'a> Tensor<'a> {
-    pub fn new(buf: impl Into<Cow<'a, [f32]>>, shape: Vec<usize>) -> Result<Self> {
-        let buf = buf.into();
-        if buf.len() != shape.iter().product() {
-            return Err(Llama2Error {
-                kind: Llama2ErrorKind::TensorError,
-                message: format!("invalid shape {:?} for data of length {}", shape, buf.len()),
-                source: None,
-            });
-        }
-
-        let mut strides = Vec::with_capacity(shape.len());
-        strides.push(1);
-        for i in 0..shape.len() - 1 {
-            strides.push(strides.last().unwrap() * shape[shape.len() - i - 1]);
-        }
-        strides.reverse();
-
-        let tensor = Self {
-            buf,
-            shape,
-            strides,
-        };
-        Ok(tensor)
-    }
-
-    pub fn iter<'b>(&'b self) -> Box<dyn Iterator<Item = f32> + 'b> {
-        if self.shape.len() == 1 {
-            return Box::new(Tensor1DIterator {
-                tensor: self,
-                logical_pos: 0,
-            });
-        }
-        Box::new(TensorIterator {
-            tensor: self,
-            logical_pos: 0,
-            idx_buf: vec![0; self.shape.len()],
-        })
-    }
-
-    pub fn at(&self, idx: &[usize]) -> Result<f32> {
-        if idx.len() != self.shape.len() {
-            return Err(Llama2Error {
-                kind: Llama2ErrorKind::TensorError,
-                message: format!(
-                    "invalid index {:?} for tensor of shape {:?}",
-                    idx, self.shape
-                ),
-                source: None,
-            });
-        }
-        for (i, &dim) in idx.iter().enumerate() {
-            if dim >= self.shape[i] {
-                return Err(Llama2Error {
-                    kind: Llama2ErrorKind::TensorError,
-                    message: format!(
-                        "invalid index {:?} for tensor of shape {:?}",
-                        idx, self.shape
-                    ),
-                    source: None,
-                });
-            }
-        }
-
-        Ok(self.at_unchecked(idx))
-    }
-
-    pub fn at_unchecked(&self, idx: &[usize]) -> f32 {
-        let offset = self.buf_offset(idx);
-        self.buf[offset]
-    }
-
-    fn buf_offset(&self, idx: &[usize]) -> usize {
-        let mut offset = 0;
-        for (dim, stride) in idx.iter().zip(self.strides.iter()) {
-            offset += dim * stride;
-        }
-        offset
-    }
-
-    pub fn transpose(&self, perm: &[usize]) -> Result<Self> {
-        if perm.len() != self.shape.len() {
-            return Err(Llama2Error {
-                kind: Llama2ErrorKind::TensorError,
-                message: format!(
-                    "invalid transpose {:?} for tensor of shape {:?}",
-                    perm, self.shape
-                ),
-                source: None,
-            });
-        }
-        let mut new_shape = vec![0; self.shape.len()];
-        for (i, &dim) in perm.iter().enumerate() {
-            new_shape[i] = self.shape[dim];
-        }
-        let mut new_strides = vec![0; self.shape.len()];
-        for (i, &dim) in perm.iter().enumerate() {
-            new_strides[i] = self.strides[dim];
-        }
-        let tensor = Self {
-            buf: self.buf.clone(),
-            shape: new_shape,
-            strides: new_strides,
-        };
-        Ok(tensor)
-    }
-
-    // todo: test it
-    pub fn crop(&self, limits: &[(usize, usize)]) -> Result<Self> {
-        let offset = self.buf_offset(&limits.iter().map(|&(start, _)| start).collect::<Vec<_>>());
-        let buf = self.slice_buf(offset..self.buf.len());
-        let shape = limits
-            .iter()
-            .map(|&(start, end)| end - start)
-            .collect::<Vec<_>>();
-        Ok(Self {
-            buf,
-            shape,
-            strides: self.strides.clone(),
-        })
-    }
-
-    pub fn subtensor(&self, row: usize) -> Result<Self> {
-        if self.shape.len() <= 1 {
-            panic!("can not subtensor a 1D tensor");
-            return Err(Llama2Error {
-                kind: Llama2ErrorKind::TensorError,
-                message: "cannot subtensor a 1D tensor".to_string(),
-                source: None,
-            });
-        }
-
-        if self.is_contiguous() {
-            let offset = row * self.strides[0];
-            let buf = self.slice_buf(offset..offset + self.strides[0]);
-            return Ok(Self {
-                buf,
-                shape: self.shape[1..].to_vec(),
-                strides: self.strides[1..].to_vec(),
-            });
-        }
-
-        let mut idx = vec![0; self.shape.len()];
-        idx[0] = row;
-        let offset = self.buf_offset(&idx);
-        let buf = self.slice_buf(offset..self.buf.len());
-        Ok(Self {
-            buf,
-            shape: self.shape[1..].to_vec(),
-            strides: self.strides[1..].to_vec(),
-        })
-    }
-
-    pub fn is_contiguous(&self) -> bool {
-        if self.strides.len() == 0 {
-            return true;
-        }
-
-        if self.strides.last() != Some(&1) {
-            return false;
-        }
-
-        let mut last_stride = 1;
-        for i in (1..self.shape.len()).rev() {
-            if last_stride != self.strides[i] {
-                return false;
-            }
-            last_stride *= self.shape[i];
-        }
-        true
-    }
-
-    pub fn contiguous(&self) -> Result<Self> {
-        if self.is_contiguous() {
-            return Ok(self.clone());
-        }
-
-        let buf = self.iter().collect::<Vec<_>>();
-        Self::new(buf, self.shape.clone())
-    }
-
-    pub fn flat(&self) -> &[f32] {
-        &self.buf
-    }
-
-    pub fn shape(&self) -> &[usize] {
-        &self.shape
-    }
-
-    pub fn subtensors(self) -> Result<Vec<Tensor<'a>>> {
-        let mut result = Vec::with_capacity(self.shape[0]);
-        for i in 0..self.shape[0] {
-            result.push(self.subtensor(i)?);
-        }
-        Ok(result)
-    }
-
-    fn slice_buf(&self, range: Range<usize>) -> Cow<'a, [f32]> {
-        match self.buf {
-            Cow::Borrowed(data) => Cow::from(&data[range]),
-            Cow::Owned(ref data) => Cow::from(Vec::from(&data[range])),
-        }
-    }
-}
-
-struct TensorIterator<'a, 'b>
-where
-    'a: 'b,
-{
-    tensor: &'b Tensor<'a>,
-    logical_pos: usize,
-    idx_buf: Vec<usize>,
-}
-
-impl<'a, 'b> Iterator for TensorIterator<'a, 'b> {
-    type Item = f32;
-
-    fn next(&mut self) -> Option<f32> {
-        if self.logical_pos >= self.tensor.buf.len() {
-            return None;
-        }
-
-        self.idx_buf.fill(0);
-        let mut lp = self.logical_pos;
-        for (dim, idx) in self
-            .tensor
-            .shape()
-            .iter()
-            .rev()
-            .zip(self.idx_buf.iter_mut().rev())
-        {
-            *idx = lp % dim;
-            lp = (lp - *idx) / dim;
-        }
-        let offset = self.tensor.buf_offset(&self.idx_buf);
-
-        self.logical_pos += 1;
-        Some(self.tensor.buf[offset])
-    }
-}
-
-struct Tensor1DIterator<'a, 'b>
-where
-    'a: 'b,
-{
-    tensor: &'b Tensor<'a>,
-    logical_pos: usize,
-}
-
-impl<'a, 'b> Iterator for Tensor1DIterator<'a, 'b> {
-    type Item = f32;
-
-    fn next(&mut self) -> Option<f32> {
-        if self.logical_pos >= self.tensor.shape[0] {
-            return None;
-        }
-
-        let physical_pos = self.logical_pos * self.tensor.strides[0];
-
-        self.logical_pos += 1;
-        Some(self.tensor.buf[physical_pos])
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, Some(self.tensor.shape[0] - self.logical_pos))
-    }
-}
 
 #[derive(Debug, Copy, Clone)]
 pub struct Llama2Config {
@@ -477,9 +172,11 @@ impl Llama2GgufLoader {
 
     fn load_weights<'a>(gf: &GGUFFile<'a>, n_layers: usize) -> Result<Llama2Weights<'a>> {
         // [64 (dim), 512 (vocab_size)]
-        let token_embedding_table = Self::load_tensor(gf, "token_embd.weight")?
-            .transpose(&[1, 0])?
-            .contiguous()?;
+        let token_embedding_table = {
+            let (tensor, dims) = Self::load_tensor(gf, "token_embd.weight")?;
+            let tensor = tensor.view(&[dims[1], dims[0]])?;
+            tensor
+        };
         let mut wq = vec![];
         let mut wk = vec![];
         let mut wv = vec![];
@@ -493,51 +190,51 @@ impl Llama2GgufLoader {
             wq.push(Self::load_tensor(
                 gf,
                 &format!("blk.{}.attn_q.weight", layer),
-            )?);
+            )?.0);
             wk.push(Self::load_tensor(
                 gf,
                 &format!("blk.{}.attn_k.weight", layer),
-            )?);
+            )?.0);
             wv.push(Self::load_tensor(
                 gf,
                 &format!("blk.{}.attn_v.weight", layer),
-            )?);
+            )?.0);
             wo.push(Self::load_tensor(
                 gf,
                 &format!("blk.{}.attn_output.weight", layer),
-            )?);
+            )?.0);
 
             // (hidden_dim:172, embedding_dim:64)
-            w1.push(
-                Self::load_tensor(gf, &format!("blk.{}.ffn_gate.weight", layer))?
-                    .transpose(&[1, 0])?
-                    .contiguous()?,
-            );
-            // (embedding_dim:64, hidden_dim:172)
-            w2.push(
-                Self::load_tensor(gf, &format!("blk.{}.ffn_up.weight", layer))?
-                    .transpose(&[1, 0])?
-                    .contiguous()?,
-            );
-            // (hidden_dim:172, embedding_dim:64)
-            w3.push(
-                Self::load_tensor(gf, &format!("blk.{}.ffn_down.weight", layer))?
-                    .transpose(&[1, 0])?
-                    .contiguous()?,
-            );
+            w1.push({
+                let (tensor, dims) = Self::load_tensor(gf, &format!("blk.{}.ffn_gate.weight", layer))?;
+                let tensor = tensor.view(&[dims[1], dims[0]])?;
+                tensor
+            });
+            w2.push({
+                let (tensor, dims) = Self::load_tensor(gf, &format!("blk.{}.ffn_down.weight", layer))?;
+                let tensor = tensor.view(&[dims[1], dims[0]])?;
+                tensor
+            });
+            w3.push({
+                let (tensor, dims) = Self::load_tensor(gf, &format!("blk.{}.ffn_up.weight", layer))?;
+                let tensor = tensor.view(&[dims[1], dims[0]])?;
+                tensor
+            });
             rms_att_weight.push(Self::load_tensor(
                 gf,
                 &format!("blk.{}.attn_norm.weight", layer),
-            )?);
+            )?.0);
             rms_ffn_weight.push(Self::load_tensor(
                 gf,
                 &format!("blk.{}.ffn_norm.weight", layer),
-            )?);
+            )?.0);
         }
-        let rms_final_weight = Self::load_tensor(gf, "output_norm.weight")?;
-        let wcls = Self::load_tensor(gf, "output.weight")?
-            .transpose(&[1, 0])?
-            .contiguous()?;
+        let rms_final_weight = Self::load_tensor(gf, "output_norm.weight")?.0;
+        let wcls = {
+            let (tensor, dims) = Self::load_tensor(gf, "output.weight")?;
+            let tensor = tensor.view(&[dims[1], dims[0]])?;
+            tensor
+        };
         Ok(Llama2Weights {
             token_embedding_table,
             wq,
@@ -554,7 +251,7 @@ impl Llama2GgufLoader {
         })
     }
 
-    fn load_tensor<'a>(gf: &GGUFFile<'a>, name: &str) -> Result<Tensor<'a>> {
+    pub(crate) fn load_tensor<'a>(gf: &GGUFFile<'a>, name: &str) -> Result<(Tensor<'a>, Vec<usize>)> {
         let info = match gf.get_tensor_info(name) {
             None => {
                 return Err(Llama2Error {
@@ -575,7 +272,8 @@ impl Llama2GgufLoader {
         let new_len = len / std::mem::size_of::<f32>();
         let ptr = info.data().as_ptr() as *const f32;
         let f32_data = unsafe { slice::from_raw_parts(ptr, new_len) };
-        Tensor::new(f32_data, info.dimensions().to_vec())
+        let tensor = Tensor::new(f32_data, info.dimensions().to_vec())?;
+        Ok((tensor, info.dimensions().to_vec()))
     }
 
     fn load_tokenizer(gf: &GGUFFile) -> Llama2Tokenizer {
@@ -1498,109 +1196,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tensor() -> Result<()> {
-        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let t = Tensor::new(&v, vec![2, 3]).unwrap();
-        assert_eq!(
-            t.subtensor(0)?.iter().collect::<Vec<_>>(),
-            vec![1.0, 2.0, 3.0]
-        );
-        assert_eq!(
-            t.subtensor(1)?.iter().collect::<Vec<_>>(),
-            vec![4.0, 5.0, 6.0]
-        );
-
-        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let t = Tensor::new(&v, vec![2, 3, 1]).unwrap();
-        assert_eq!(format!("{:?}", t.strides), "[3, 1, 1]");
-        assert_eq!(t.is_contiguous(), true);
-        assert_eq!(t.subtensor(0)?.flat().to_vec(), vec![1.0, 2.0, 3.0]);
-        assert_eq!(t.subtensor(1)?.flat().to_vec(), vec![4.0, 5.0, 6.0]);
-        assert_eq!(t.subtensor(0)?.subtensor(0)?.flat().to_vec(), vec![1.0]);
-        assert_eq!(t.subtensor(0)?.subtensor(1)?.flat().to_vec(), vec![2.0]);
-        assert_eq!(t.subtensor(0)?.subtensor(2)?.flat().to_vec(), vec![3.0]);
-        assert_eq!(t.subtensor(1)?.subtensor(0)?.flat().to_vec(), vec![4.0]);
-        assert_eq!(t.subtensor(1)?.shape().to_vec(), vec![3, 1]);
-
-        let v = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
-        ];
-        let t = Tensor::new(&v, vec![2, 3, 2, 1]).unwrap();
-        assert_eq!(
-            t.subtensor(0)?.flat().to_vec(),
-            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-        );
-        assert_eq!(
-            t.subtensor(1)?.flat().to_vec(),
-            vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_tensor_transform() -> Result<()> {
-        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let t = Tensor::new(&v, vec![2, 3]).unwrap();
-        assert_eq!(t.strides.to_vec(), vec![3, 1]);
-        assert_eq!(t.at(&[0, 0])?, 1.0);
-        assert_eq!(t.at(&[0, 1])?, 2.0);
-        assert_eq!(t.at(&[0, 2])?, 3.0);
-        assert_eq!(
-            t.at(&[0, 4]).unwrap_err().kind,
-            Llama2ErrorKind::TensorError
-        );
-        assert_eq!(t.at(&[1, 0])?, 4.0); // offset = 1 * 3 + 0 * 1 = 2
-        assert_eq!(t.at(&[1, 1])?, 5.0);
-        assert_eq!(t.at(&[1, 2])?, 6.0);
-
-        let t = t.transpose(&[1, 0])?;
-        assert_eq!(t.strides.to_vec(), vec![1, 3]);
-        assert_eq!(t.at(&[0, 0])?, 1.0);
-        assert_eq!(t.at(&[1, 0])?, 2.0);
-        assert_eq!(t.at(&[2, 0])?, 3.0);
-        assert_eq!(
-            t.at(&[4, 0]).unwrap_err().kind,
-            Llama2ErrorKind::TensorError
-        );
-        assert_eq!(t.at(&[0, 1])?, 4.0);
-        assert_eq!(t.at(&[1, 1])?, 5.0);
-        assert_eq!(t.at(&[2, 1])?, 6.0);
-
-        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let t = Tensor::new(&v, vec![2, 3]).unwrap(); // 2x3
-        let t1 = t.subtensor(0)?; // (3, )
-        assert_eq!(t1.shape(), &[3]);
-        assert_eq!(t1.at(&[0])?, 1.0); // offset = 1 * 3 + 0 * 1 = 2
-        assert_eq!(t1.at(&[1])?, 2.0);
-        assert_eq!(t1.at(&[2])?, 3.0);
-        let t2 = t.transpose(&[1, 0])?;
-        assert_eq!(t2.shape.to_vec(), vec![3, 2]);
-        let t3 = t.subtensor(1)?; // (2, )
-        assert_eq!(t3.at(&[0])?, 4.0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_tensor_iterator() -> Result<()> {
-        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let t = Tensor::new(&v, vec![2, 3]).unwrap();
-        let tv = t.iter().collect::<Vec<_>>();
-        assert_eq!(tv, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-
-        let t = t.transpose(&[1, 0])?;
-        let tv = t.iter().collect::<Vec<_>>();
-        assert_eq!(tv, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
-
-        let v = vec![1.0, 2.0, 3.0, 4.0];
-        let t = Tensor::new(&v, vec![4]).unwrap();
-        let tv = t.iter().collect::<Vec<_>>();
-        assert_eq!(tv, vec![1.0, 2.0, 3.0, 4.0]);
-
-        Ok(())
-    }
-
-    #[test]
     fn test_checkpoint_loader() -> Result<()> {
         let loader =
             Llama2CheckpointLoader::new("testdata/stories15M.bin", "testdata/tokenizer.bin")?;
@@ -1693,38 +1288,59 @@ mod tests {
         let (conf, weights, tokenizer) = checkpoint_loader.load()?;
         let mut sampler = Llama2Sampler::new(conf.vocab_size, 0.0, 0.0);
         let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
-        let output = runner.generate("hello, world", 15, &mut sampler)?;
+        let output = runner.generate("big rat lives", 15, &mut sampler)?;
         let s = output.collect::<Result<Vec<String>>>()?.join("");
         assert_eq!(
             s,
-            "ers. They were very friendly and always had a smile on their faces. One"
+            " in the forest. He likes to eat cheese and bread. He has"
         );
         Ok(())
     }
 
-
     #[test]
-    fn test_load_gguf() -> Result<()> {
-        let mut loader = Llama2GgufLoader::new("testdata/tinyllamas-stories-15m-f32.gguf")?;
-        let (conf, weights, tokenizer) = loader.load()?;
-        assert_eq!(conf.embedding_dim, 288);
-        assert_eq!(conf.vocab_size, 32000);
-        assert_eq!(weights.token_embedding_table.shape(), &[32000, 288]);
-        assert_eq!(weights.wq[0].shape(), &[288, 288]);
-        assert_eq!(weights.wk[0].shape(), &[288, 288]);
+    fn test_generate_gguf() -> Result<()> {
+        let gguf_loader = Llama2GgufLoader::new("testdata/tinyllamas-stories-15m-f32.gguf")?;
 
+        let (conf, weights, tokenizer) = gguf_loader.load()?;
         let mut sampler = Llama2Sampler::new(conf.vocab_size, 0.0, 0.0);
         let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
-        // matmul (xb, wk)
-        // xb(64, ) @ wk(64, 32)
-        // out: (32, )
-
-        let output = runner.generate("a time", 15, &mut sampler)?;
+        let output = runner.generate("Juice", 15, &mut sampler)?;
         let s = output.collect::<Result<Vec<String>>>()?.join("");
         assert_eq!(
             s,
-            "ers. They were very friendly and always had a smile on their faces. One"
+            "▁and▁his▁mom▁were▁walking▁in▁the▁park.▁They▁saw▁a▁big▁tree▁with▁a"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_gguf() -> Result<()> {
+        let ckpt_loader =
+            Llama2CheckpointLoader::new("testdata/stories15M.bin", "testdata/tokenizer.bin")?;
+        let gguf_loader = Llama2GgufLoader::new("testdata/tinyllamas-stories-15m-f32.gguf")?;
+
+        let (ckpt_conf, ckpt_weights, ckpt_tokenizer) = ckpt_loader.load()?;
+        let (gguf_conf, gguf_weights, gguf_tokenizer) = gguf_loader.load()?;
+        let gguf_file = gguf_loader.inner.load().unwrap();
+
+        for l in 0..ckpt_conf.n_layers {
+            assert_eq!(format!("{:?}", gguf_weights.rms_att_weight[l].flat()), format!("{:?}", ckpt_weights.rms_att_weight[l].flat()));
+            assert_eq!(format!("{:?}", gguf_weights.rms_ffn_weight[l].flat()), format!("{:?}", ckpt_weights.rms_ffn_weight[l].flat()));
+            assert_eq!(format!("{:?}", gguf_weights.wq[l].flat()), format!("{:?}", ckpt_weights.wq[l].flat()));
+            assert_eq!(format!("{:?}", gguf_weights.wk[l].flat()), format!("{:?}", ckpt_weights.wk[l].flat()));
+            assert_eq!(format!("{:?}", gguf_weights.wv[l].flat()), format!("{:?}", ckpt_weights.wv[l].flat()));
+            assert_eq!(format!("{:?}", gguf_weights.wo[l].flat()), format!("{:?}", ckpt_weights.wo[l].flat()));
+            assert_eq!(gguf_weights.w1[l].shape(), &[768, 288]);
+            assert_eq!(ckpt_weights.w1[l].shape(), &[768, 288]);
+            let w1tensor = Llama2GgufLoader::load_tensor(&gguf_file, &format!("blk.{}.ffn_gate.weight", l)).unwrap().0;
+            // println!("w1 tensor:\n{}", w1tensor.view(&[768, 288])?.to_string());
+            assert_eq!(&gguf_weights.w1[l].flat(), &ckpt_weights.w1[l].flat());
+            assert_eq!(&gguf_weights.w2[l].flat(), &ckpt_weights.w2[l].flat());
+            assert_eq!(&gguf_weights.w3[l].flat(), &ckpt_weights.w3[l].flat());
+        }
+        assert_eq!(gguf_weights.token_embedding_table.flat(), ckpt_weights.token_embedding_table.flat());
+        assert_eq!(gguf_weights.rms_final_weight.flat(), ckpt_weights.rms_final_weight.flat());
+        assert_eq!(gguf_weights.wcls.flat(), ckpt_weights.wcls.flat());
         Ok(())
     }
 

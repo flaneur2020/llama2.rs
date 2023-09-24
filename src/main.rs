@@ -1,6 +1,9 @@
 mod llama2;
+mod error;
+mod tensor;
 use clap::Parser;
-use llama2::{Llama2CheckpointLoader, Llama2Loader, Llama2Runner, Llama2Sampler, Result};
+use crate::llama2::{Llama2CheckpointLoader, Llama2Loader, Llama2Runner, Llama2Sampler};
+use crate::error::Result;
 use std::io::Write;
 
 #[derive(Parser, Debug)]
