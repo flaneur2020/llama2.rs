@@ -506,18 +506,22 @@ impl Llama2GgufLoader {
                 gf,
                 &format!("blk.{}.attn_output.weight", layer),
             )?);
+
+            // (hidden_dim:172, embedding_dim:64)
             w1.push(
                 Self::load_tensor(gf, &format!("blk.{}.ffn_gate.weight", layer))?
                     .transpose(&[1, 0])?
                     .contiguous()?,
             );
+            // (embedding_dim:64, hidden_dim:172)
             w2.push(
-                Self::load_tensor(gf, &format!("blk.{}.ffn_down.weight", layer))?
+                Self::load_tensor(gf, &format!("blk.{}.ffn_up.weight", layer))?
                     .transpose(&[1, 0])?
                     .contiguous()?,
             );
+            // (hidden_dim:172, embedding_dim:64)
             w3.push(
-                Self::load_tensor(gf, &format!("blk.{}.ffn_up.weight", layer))?
+                Self::load_tensor(gf, &format!("blk.{}.ffn_down.weight", layer))?
                     .transpose(&[1, 0])?
                     .contiguous()?,
             );
@@ -825,7 +829,7 @@ impl Llama2Tokenizer {
                 piece = &self.byte_pieces[(byte as usize)..(byte as usize) + 1]
             }
         }
-        Ok(String::from_utf8(piece.to_vec()).unwrap())
+        Ok(String::from_utf8_lossy(piece).into())
     }
 
     #[allow(dead_code)]
@@ -1714,7 +1718,7 @@ mod tests {
         // xb(64, ) @ wk(64, 32)
         // out: (32, )
 
-        let output = runner.generate("hello, world", 15, &mut sampler)?;
+        let output = runner.generate("once a time", 30, &mut sampler)?;
         let s = output.collect::<Result<Vec<String>>>()?.join("");
         assert_eq!(
             s,

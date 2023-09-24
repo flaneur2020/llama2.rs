@@ -2,5 +2,6 @@
 - [x] strides in Tensor
 - [x] cow in tensor data
 - [x] subtensor
-- [ ] llama2 gguf load weights
+- [x] llama2 gguf load weights
+- [ ] test tokenizer in gguf tinystories
 - [ ] execute llama6b
