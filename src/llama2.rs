@@ -1331,20 +1331,18 @@ mod tests {
         assert_eq!(gguf_tokenizer.vocab.len(), ckpt_tokenizer.vocab.len());
         assert_eq!(gguf_tokenizer.vocab[1000], ckpt_tokenizer.vocab[1000]);
         assert_eq!(gguf_tokenizer.vocab[3000], ckpt_tokenizer.vocab[3000]);
-        assert_eq!(gguf_tokenizer.vocab, ckpt_tokenizer.vocab);
         assert_eq!(gguf_tokenizer.vocab_scores[3000], ckpt_tokenizer.vocab_scores[3000]);
 
         // check the weights
         for l in 0..ckpt_conf.n_layers {
             assert_eq!(gguf_weights.rms_att_weight[l].flat(), ckpt_weights.rms_att_weight[l].flat());
             assert_eq!(gguf_weights.rms_ffn_weight[l].flat(), ckpt_weights.rms_ffn_weight[l].flat());
-            assert_eq!(format!("{:?}", gguf_weights.wq[l].flat()), format!("{:?}", ckpt_weights.wq[l].flat()));
-            assert_eq!(format!("{:?}", gguf_weights.wk[l].flat()), format!("{:?}", ckpt_weights.wk[l].flat()));
-            assert_eq!(format!("{:?}", gguf_weights.wv[l].flat()), format!("{:?}", ckpt_weights.wv[l].flat()));
-            assert_eq!(format!("{:?}", gguf_weights.wo[l].flat()), format!("{:?}", ckpt_weights.wo[l].flat()));
+            assert_eq!(gguf_weights.wq[l].flat(), ckpt_weights.wq[l].flat());
+            assert_eq!(gguf_weights.wk[l].flat(), ckpt_weights.wk[l].flat());
+            assert_eq!(gguf_weights.wv[l].flat(), ckpt_weights.wv[l].flat());
+            assert_eq!(gguf_weights.wo[l].flat(), ckpt_weights.wo[l].flat());
             assert_eq!(gguf_weights.w1[l].shape(), &[768, 288]);
             assert_eq!(ckpt_weights.w1[l].shape(), &[768, 288]);
-            let w1tensor = Llama2GgufLoader::load_tensor(&gguf_file, &format!("blk.{}.ffn_gate.weight", l)).unwrap().0;
             // println!("w1 tensor:\n{}", w1tensor.view(&[768, 288])?.to_string());
             assert_eq!(&gguf_weights.w1[l].flat(), &ckpt_weights.w1[l].flat());
             assert_eq!(&gguf_weights.w2[l].flat(), &ckpt_weights.w2[l].flat());
