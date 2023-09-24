@@ -10,3 +10,4 @@ rand = "0.8.5"
 rayon = "1.7.0"
 num_cpus = "1.16.0"
 crabml = { git = "https://github.com/flaneur2020/crabml.git", commit = "910c4c6" }
+pretty_assertions = "1.2.1"

@@ -527,7 +527,10 @@ impl Llama2Tokenizer {
                 piece = &self.byte_pieces[(byte as usize)..(byte as usize) + 1]
             }
         }
-        Ok(String::from_utf8_lossy(piece).into())
+
+        let mut s = String::from_utf8_lossy(piece).to_string();
+        s = s.replace('▁', " ");
+        Ok(s)
     }
 
     #[allow(dead_code)]
@@ -1174,6 +1177,7 @@ impl<'a> Iterator for Llama2RunnerOutputGenerator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn test_accum() {
@@ -1299,16 +1303,16 @@ mod tests {
 
     #[test]
     fn test_generate_gguf() -> Result<()> {
-        let gguf_loader = Llama2GgufLoader::new("testdata/tinyllamas-stories-260k-f32.gguf")?;
+        let gguf_loader = Llama2GgufLoader::new("testdata/tinyllamas-stories-15M-f32.gguf")?;
 
         let (conf, weights, tokenizer) = gguf_loader.load()?;
         let mut sampler = Llama2Sampler::new(conf.vocab_size, 0.0, 0.0);
         let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
-        let output = runner.generate("there should light", 15, &mut sampler)?;
+        let output = runner.generate("Hello world", 15, &mut sampler)?;
         let s = output.collect::<Result<Vec<String>>>()?.join("");
         assert_eq!(
             s,
-            "h▁and▁and▁a▁sist▁and\"▁andste▁and▁fly"
+            ", a little girl named Lily was playing in her backyard. She saw"
         );
         Ok(())
     }
@@ -1323,9 +1327,17 @@ mod tests {
         let (gguf_conf, gguf_weights, gguf_tokenizer) = gguf_loader.load()?;
         let gguf_file = gguf_loader.inner.load().unwrap();
 
+        // check the tokenizer
+        assert_eq!(gguf_tokenizer.vocab.len(), ckpt_tokenizer.vocab.len());
+        assert_eq!(gguf_tokenizer.vocab[1000], ckpt_tokenizer.vocab[1000]);
+        assert_eq!(gguf_tokenizer.vocab[3000], ckpt_tokenizer.vocab[3000]);
+        assert_eq!(gguf_tokenizer.vocab, ckpt_tokenizer.vocab);
+        assert_eq!(gguf_tokenizer.vocab_scores[3000], ckpt_tokenizer.vocab_scores[3000]);
+
+        // check the weights
         for l in 0..ckpt_conf.n_layers {
-            assert_eq!(format!("{:?}", gguf_weights.rms_att_weight[l].flat()), format!("{:?}", ckpt_weights.rms_att_weight[l].flat()));
-            assert_eq!(format!("{:?}", gguf_weights.rms_ffn_weight[l].flat()), format!("{:?}", ckpt_weights.rms_ffn_weight[l].flat()));
+            assert_eq!(gguf_weights.rms_att_weight[l].flat(), ckpt_weights.rms_att_weight[l].flat());
+            assert_eq!(gguf_weights.rms_ffn_weight[l].flat(), ckpt_weights.rms_ffn_weight[l].flat());
             assert_eq!(format!("{:?}", gguf_weights.wq[l].flat()), format!("{:?}", ckpt_weights.wq[l].flat()));
             assert_eq!(format!("{:?}", gguf_weights.wk[l].flat()), format!("{:?}", ckpt_weights.wk[l].flat()));
             assert_eq!(format!("{:?}", gguf_weights.wv[l].flat()), format!("{:?}", ckpt_weights.wv[l].flat()));
