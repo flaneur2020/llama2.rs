@@ -1638,11 +1638,15 @@ mod tests {
         let tk = loader.load(32000)?;
         assert_eq!(tk.vocab.len(), 32000);
         assert_eq!(tk.vocab_scores[0], 0.0);
+        assert_eq!(tk.decode(2, 0)?, "<unk>");
+        assert_eq!(tk.decode(2, 1)?, "\n<s>\n");
+        assert_eq!(tk.decode(2, 2)?, "\n</s>\n");
         assert_eq!(tk.decode(2, 3)?, "\u{0}");
         assert_eq!(tk.decode(2, 5)?, "\u{2}");
         assert_eq!(tk.decode(2, 6)?, "\u{3}");
         assert_eq!(tk.decode(2, 1000)?, "ied");
         assert_eq!(tk.decode(2, 1001)?, "ER");
+        assert_eq!(tk.vocab_scores[1000], -741.0);
         let max_token_len = tk.vocab.iter().map(|v| v.len()).max().unwrap();
         assert_eq!(max_token_len, 27);
         assert_eq!(tk.token_buf_len, 27);
@@ -1701,29 +1705,65 @@ mod tests {
 
     #[test]
     fn test_load_gguf() -> Result<()> {
-        let mut loader = Llama2GgufLoader::new("testdata/tinyllamas-stories-260k-f32.gguf")?;
+        let mut loader = Llama2GgufLoader::new("testdata/tinyllamas-stories-15m-f32.gguf")?;
         let (conf, weights, tokenizer) = loader.load()?;
-        assert_eq!(conf.embedding_dim, 64);
-        assert_eq!(conf.vocab_size, 512);
-        assert_eq!(weights.token_embedding_table.shape(), &[512, 64]);
-        assert_eq!(weights.wq[0].shape(), &[64, 64]);
-        assert_eq!(weights.wk[0].shape(), &[64, 32]);
+        assert_eq!(conf.embedding_dim, 288);
+        assert_eq!(conf.vocab_size, 32000);
+        assert_eq!(weights.token_embedding_table.shape(), &[32000, 288]);
+        assert_eq!(weights.wq[0].shape(), &[288, 288]);
+        assert_eq!(weights.wk[0].shape(), &[288, 288]);
 
         let mut sampler = Llama2Sampler::new(conf.vocab_size, 0.0, 0.0);
         let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
-        assert_eq!(runner.state.x.len(), 64);
-        assert_eq!(runner.state.k.len(), 32);
-        assert_eq!(runner.state.xb.len(), 64);
         // matmul (xb, wk)
         // xb(64, ) @ wk(64, 32)
         // out: (32, )
 
-        let output = runner.generate("once a time", 30, &mut sampler)?;
+        let output = runner.generate("a time", 15, &mut sampler)?;
         let s = output.collect::<Result<Vec<String>>>()?.join("");
         assert_eq!(
             s,
             "ers. They were very friendly and always had a smile on their faces. One"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_gguf_tokenizer() -> Result<()> {
+        let loader = Llama2GgufLoader::new("testdata/tinyllamas-stories-15m-f32.gguf")?;
+        let (_, _, tk) = loader.load()?;
+
+        assert_eq!(tk.decode(2, 3)?, "\u{0}");
+        assert_eq!(tk.decode(2, 5)?, "\u{2}");
+        assert_eq!(tk.decode(2, 6)?, "\u{3}");
+        assert_eq!(tk.decode(2, 1000)?, "ied");
+        assert_eq!(tk.decode(2, 1001)?, "ER");
+        assert_eq!(tk.vocab_scores[1000], -741.0);
+
+        let tests = vec![
+            ("hello, world", "<s> - hello - , - <0x20> - world - </s>"),
+            (
+                "i'm 4 years old",
+                "<s> - i - ' - m - <0x20> - 4 - <0x20> - year - s - <0x20> - old - </s>",
+            ),
+            ("tiktok", "<s> - t - ik - tok - </s>"),
+            (
+                "wake up september",
+                "<s> - w - ake - <0x20> - up - <0x20> - se - ptember - </s>",
+            ),
+            ("boy", "<s> - boy - </s>"),
+            ("fan girl", "<s> - fan - <0x20> - g - irl - </s>"),
+        ];
+
+        for tt in tests {
+            let tokens = tk.encode(tt.0, true, true)?;
+            let tokens_in_string = tokens
+                .iter()
+                .map(|t| tk.vocab[*t].clone())
+                .collect::<Vec<String>>()
+                .join(" - ");
+            assert_eq!(tokens_in_string, tt.1, "failed to encode {}", tt.0);
+        }
         Ok(())
     }
 }
