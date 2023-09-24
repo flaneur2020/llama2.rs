@@ -1299,16 +1299,16 @@ mod tests {
 
     #[test]
     fn test_generate_gguf() -> Result<()> {
-        let gguf_loader = Llama2GgufLoader::new("testdata/tinyllamas-stories-15m-f32.gguf")?;
+        let gguf_loader = Llama2GgufLoader::new("testdata/tinyllamas-stories-260k-f32.gguf")?;
 
         let (conf, weights, tokenizer) = gguf_loader.load()?;
         let mut sampler = Llama2Sampler::new(conf.vocab_size, 0.0, 0.0);
         let mut runner = Llama2Runner::new(&conf, weights, tokenizer);
-        let output = runner.generate("Juice", 15, &mut sampler)?;
+        let output = runner.generate("there should light", 15, &mut sampler)?;
         let s = output.collect::<Result<Vec<String>>>()?.join("");
         assert_eq!(
             s,
-            "▁and▁his▁mom▁were▁walking▁in▁the▁park.▁They▁saw▁a▁big▁tree▁with▁a"
+            "h▁and▁and▁a▁sist▁and\"▁andste▁and▁fly"
         );
         Ok(())
     }
